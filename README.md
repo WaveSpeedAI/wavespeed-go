@@ -1,6 +1,22 @@
-# WaveSpeed Go SDK (Preview)
+<div align="center">
+  <a href="https://wavespeed.ai" target="_blank" rel="noopener noreferrer">
+    <img src="https://raw.githubusercontent.com/WaveSpeedAI/waverless/main/docs/images/wavespeed-dark-logo.png" alt="WaveSpeedAI logo" width="200"/>
+  </a>
 
-> Simple, Python-like API for running WaveSpeed models from Go. Serverless features are not included in this preview.
+  <h1>WaveSpeedAI Go SDK</h1>
+
+  <p>
+    <strong>Official Go SDK for the WaveSpeedAI inference platform</strong>
+  </p>
+
+  <p>
+    <a href="https://wavespeed.ai" target="_blank" rel="noopener noreferrer">🌐 Visit wavespeed.ai</a> •
+    <a href="https://wavespeed.ai/docs">📖 Documentation</a> •
+    <a href="https://github.com/WaveSpeedAI/wavespeed-go/issues">💬 Issues</a>
+  </p>
+</div>
+
+---
 
 ## Installation
 
@@ -8,42 +24,61 @@
 go get github.com/WaveSpeedAI/wavespeed-go
 ```
 
-## Quick Start
+## API Client
 
-### Run a model
+Run WaveSpeed AI models with a simple API:
 
 ```go
-package main
+import wavespeed "github.com/WaveSpeedAI/wavespeed-go"
 
-import (
-	"fmt"
-	"log"
-
-	wavespeed "github.com/WaveSpeedAI/wavespeed-go"
-)
-
-func main() {
-	// API key is read from WAVESPEED_API_KEY if not provided
-	client, err := wavespeed.NewClient("")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
-		"prompt": "Cat",
-	}, &wavespeed.RunOptions{
-		TimeoutSeconds:    36000, // optional, overall wait timeout (seconds)
-		PollIntervalSeconds: 1,   // optional, status poll interval (seconds)
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println(output.Outputs[0]) // first output URL
+client, err := wavespeed.NewClient("")
+if err != nil {
+	log.Fatal(err)
 }
+
+output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
+	"prompt": "Cat",
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+fmt.Println(output.Outputs[0]) // Output URL
 ```
 
-### Upload a file
+Or with direct API key:
+
+```go
+client, err := wavespeed.NewClient("your-api-key")
+output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
+	"prompt": "Cat",
+})
+```
+
+### Authentication
+
+Set your API key via environment variable (You can get your API key from [https://wavespeed.ai/accesskey](https://wavespeed.ai/accesskey)):
+
+```bash
+export WAVESPEED_API_KEY="your-api-key"
+```
+
+Or pass it directly when creating the client (see examples above).
+
+### Options
+
+```go
+output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
+	"prompt": "Cat",
+}, &wavespeed.RunOptions{
+	TimeoutSeconds:      36000, // Max wait time in seconds (default: 36000)
+	PollIntervalSeconds: 1,     // Status check interval (default: 1)
+})
+```
+
+### Upload Files
+
+Upload images, videos, or audio files:
 
 ```go
 url, err := client.Upload("/path/to/image.png")
@@ -53,31 +88,16 @@ if err != nil {
 fmt.Println(url)
 ```
 
-## Options
-
-- `TimeoutSeconds` (optional): overall wait timeout for `Run`, default `36000`.
-- `PollIntervalSeconds` (optional): status check interval, default `1`.
-
-## Authentication
-
-Set your API key via environment variable:
-
-```bash
-export WAVESPEED_API_KEY="your-api-key"
-```
-
-Or pass it when creating the client:
-
-```go
-client, err := wavespeed.NewClient("your-api-key")
-```
-
 ## Environment Variables
 
-- `WAVESPEED_API_KEY` — WaveSpeed API key
-- `WAVESPEED_BASE_URL` — API base URL without path (default: `https://api.wavespeed.ai`)
-- `WAVESPEED_POLL_INTERVAL` — poll interval seconds for `Run` (default: `1`)
-- `WAVESPEED_TIMEOUT` — overall wait timeout seconds for `Run` (default: `36000`)
+### API Client
+
+| Variable | Description |
+|----------|-------------|
+| `WAVESPEED_API_KEY` | WaveSpeed API key |
+| `WAVESPEED_BASE_URL` | API base URL without path (default: `https://api.wavespeed.ai`) |
+| `WAVESPEED_POLL_INTERVAL` | Poll interval seconds for `Run` (default: `1`) |
+| `WAVESPEED_TIMEOUT` | Overall wait timeout seconds for `Run` (default: `36000`)
 
 ## License
 
