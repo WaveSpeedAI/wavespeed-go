@@ -73,6 +73,33 @@ output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
 }, &wavespeed.RunOptions{
 	TimeoutSeconds:      36000, // Max wait time in seconds (default: 36000)
 	PollIntervalSeconds: 1,     // Status check interval (default: 1)
+	EnableSyncMode:      false, // Single request mode, no polling (default: false)
+})
+```
+
+### Sync Mode
+
+Use `EnableSyncMode: true` for a single request that waits for the result (no polling).
+
+> **Note:** Not all models support sync mode. Check the model documentation for availability.
+
+```go
+output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
+	"prompt": "Cat",
+}, &wavespeed.RunOptions{
+	EnableSyncMode: true,
+})
+```
+
+### Retry Configuration
+
+Configure retries at the client level:
+
+```go
+client, err := wavespeed.NewClient("your-api-key", &wavespeed.ClientOptions{
+	MaxRetries:           0, // Task-level retries (default: 0)
+	MaxConnectionRetries: 5, // HTTP connection retries (default: 5)
+	RetryInterval:        1, // Base delay between retries in seconds (default: 1)
 })
 ```
 

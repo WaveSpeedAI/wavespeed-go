@@ -18,26 +18,34 @@ import (
 
 // Client provides methods to run models and upload files.
 type Client struct {
-	apiKey        string
-	baseURL       string
-	pollInterval  time.Duration
-	waitTimeout   time.Duration
-	httpClient    *http.Client
+	apiKey               string
+	baseURL              string
+	pollInterval         time.Duration
+	waitTimeout          time.Duration
+	httpClient           *http.Client
+	maxRetries           int
+	maxConnectionRetries int
+	retryInterval        time.Duration
 }
 
 // ClientOptions configures the client at construction time.
 type ClientOptions struct {
-	BaseURL             string   // API base URL without path (default: https://api.wavespeed.ai)
-	APIKey              string   // overrides provided apiKey or env
-	PollIntervalSeconds *float64 // default: 1
-	TimeoutSeconds      *float64 // overall wait timeout, default: 36000
-	HTTPClient          *http.Client
+	BaseURL              string   // API base URL without path (default: https://api.wavespeed.ai)
+	APIKey               string   // overrides provided apiKey or env
+	PollIntervalSeconds  *float64 // default: 1
+	TimeoutSeconds       *float64 // overall wait timeout, default: 36000
+	HTTPClient           *http.Client
+	MaxRetries           *int     // task-level retries (default: 0)
+	MaxConnectionRetries *int     // HTTP connection retries (default: 5)
+	RetryInterval        *float64 // base delay between retries in seconds (default: 1)
 }
 
 // RunOptions applies to a single Run call.
 type RunOptions struct {
 	TimeoutSeconds      *float64 // overall wait timeout for this call
 	PollIntervalSeconds *float64 // poll interval for this call
+	EnableSyncMode      *bool    // if true, use synchronous mode (single request)
+	MaxRetries          *int     // maximum retries for this request (overrides client default)
 }
 
 // Prediction matches the API response data for a prediction.
@@ -104,14 +112,32 @@ func NewClient(apiKey string, opts *ClientOptions) (*Client, error) {
 		wait = *opts.TimeoutSeconds
 	}
 
+	maxRetries := 0
+	if opts != nil && opts.MaxRetries != nil {
+		maxRetries = *opts.MaxRetries
+	}
+
+	maxConnRetries := 5
+	if opts != nil && opts.MaxConnectionRetries != nil {
+		maxConnRetries = *opts.MaxConnectionRetries
+	}
+
+	retryInt := 1.0
+	if opts != nil && opts.RetryInterval != nil {
+		retryInt = *opts.RetryInterval
+	}
+
 	client := opts.getHTTPClient()
 
 	return &Client{
-		apiKey:       key,
-		baseURL:      base,
-		pollInterval: poll,
-		waitTimeout:  time.Duration(wait * float64(time.Second)),
-		httpClient:   client,
+		apiKey:               key,
+		baseURL:              base,
+		pollInterval:         poll,
+		waitTimeout:          time.Duration(wait * float64(time.Second)),
+		httpClient:           client,
+		maxRetries:           maxRetries,
+		maxConnectionRetries: maxConnRetries,
+		retryInterval:        time.Duration(retryInt * float64(time.Second)),
 	}, nil
 }
 
@@ -133,6 +159,9 @@ func (c *Client) runWithContext(ctx context.Context, modelID string, input map[s
 	}
 	reqTimeout := c.waitTimeout
 	poll := c.pollInterval
+	enableSync := false
+	taskRetries := c.maxRetries
+
 	if opts != nil {
 		if opts.TimeoutSeconds != nil {
 			reqTimeout = time.Duration(*opts.TimeoutSeconds * float64(time.Second))
@@ -140,16 +169,50 @@ func (c *Client) runWithContext(ctx context.Context, modelID string, input map[s
 		if opts.PollIntervalSeconds != nil {
 			poll = time.Duration(*opts.PollIntervalSeconds * float64(time.Second))
 		}
+		if opts.EnableSyncMode != nil {
+			enableSync = *opts.EnableSyncMode
+		}
+		if opts.MaxRetries != nil {
+			taskRetries = *opts.MaxRetries
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, reqTimeout)
 	defer cancel()
 
-	id, err := c.submit(ctx, modelID, input)
+	var lastErr error
+	for attempt := 0; attempt <= taskRetries; attempt++ {
+		pred, err := c.runOnce(ctx, modelID, input, enableSync, poll, reqTimeout)
+		if err == nil {
+			return pred, nil
+		}
+
+		lastErr = err
+		if !c.isRetryable(err) || attempt >= taskRetries {
+			break
+		}
+
+		delay := c.retryInterval * time.Duration(attempt+1)
+		fmt.Printf("Task attempt %d/%d failed: %v\n", attempt+1, taskRetries+1, err)
+		fmt.Printf("Retrying in %v...\n", delay)
+		time.Sleep(delay)
+	}
+
+	return nil, lastErr
+}
+
+func (c *Client) runOnce(ctx context.Context, modelID string, input map[string]any, enableSync bool, poll time.Duration, reqTimeout time.Duration) (*Prediction, error) {
+	pred, err := c.submit(ctx, modelID, input, enableSync)
 	if err != nil {
 		return nil, err
 	}
 
+	// In sync mode, the prediction is already complete
+	if enableSync {
+		return pred, nil
+	}
+
+	// Async mode: poll for completion
 	for {
 		select {
 		case <-ctx.Done():
@@ -157,7 +220,7 @@ func (c *Client) runWithContext(ctx context.Context, modelID string, input map[s
 		default:
 		}
 
-		pred, err := c.getResult(ctx, id)
+		pred, err = c.getResult(ctx, pred.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -166,6 +229,18 @@ func (c *Client) runWithContext(ctx context.Context, modelID string, input map[s
 		}
 		time.Sleep(poll)
 	}
+}
+
+func (c *Client) isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// Retry on timeout, connection errors, and 5xx errors
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "HTTP 5") ||
+		strings.Contains(errStr, "HTTP 429")
 }
 
 // Upload uploads a local file and returns download_url.
@@ -223,70 +298,114 @@ func (c *Client) Upload(filePath string) (string, error) {
 	return "", errors.New("upload failed: download_url missing in response")
 }
 
-// submit sends a prediction request and returns the prediction ID.
-func (c *Client) submit(ctx context.Context, modelID string, input map[string]any) (string, error) {
-	body, err := json.Marshal(input)
-	if err != nil {
-		return "", err
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/"+modelID, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("submit failed: HTTP %d: %s", resp.StatusCode, string(b))
+// submit sends a prediction request and returns the prediction (or just ID for async).
+func (c *Client) submit(ctx context.Context, modelID string, input map[string]any, enableSync bool) (*Prediction, error) {
+	bodyData := input
+	if enableSync {
+		// Add enable_sync_mode to the input
+		bodyData = make(map[string]any)
+		for k, v := range input {
+			bodyData[k] = v
+		}
+		bodyData["enable_sync_mode"] = true
 	}
 
-	var pr predictionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		return "", err
+	body, err := json.Marshal(bodyData)
+	if err != nil {
+		return nil, err
 	}
-	if pr.Code != 200 {
-		return "", fmt.Errorf("submit failed: code %d message %s", pr.Code, pr.Message)
+
+	var lastErr error
+	for retry := 0; retry <= c.maxConnectionRetries; retry++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/"+modelID, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if retry < c.maxConnectionRetries {
+				delay := c.retryInterval * time.Duration(retry+1)
+				fmt.Printf("Connection error on attempt %d/%d: %v\n", retry+1, c.maxConnectionRetries+1, err)
+				fmt.Printf("Retrying in %v...\n", delay)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, fmt.Errorf("failed to submit prediction after %d attempts: %w", c.maxConnectionRetries+1, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("submit failed: HTTP %d: %s", resp.StatusCode, string(b))
+		}
+
+		var pr predictionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+			return nil, err
+		}
+		if pr.Code != 200 {
+			return nil, fmt.Errorf("submit failed: code %d message %s", pr.Code, pr.Message)
+		}
+
+		// In sync mode, the result is returned directly
+		if enableSync {
+			return &pr.Data, nil
+		}
+
+		// In async mode, just return the prediction with ID
+		if pr.Data.ID == "" {
+			return nil, errors.New("submit failed: missing prediction id")
+		}
+		return &pr.Data, nil
 	}
-	if pr.Data.ID == "" {
-		return "", errors.New("submit failed: missing prediction id")
-	}
-	return pr.Data.ID, nil
+
+	return nil, fmt.Errorf("failed to submit prediction after %d attempts: %w", c.maxConnectionRetries+1, lastErr)
 }
 
 // getResult fetches prediction status/result by ID.
 func (c *Client) getResult(ctx context.Context, predictionID string) (*Prediction, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/predictions/"+predictionID+"/result", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	var lastErr error
+	for retry := 0; retry <= c.maxConnectionRetries; retry++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/predictions/"+predictionID+"/result", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if retry < c.maxConnectionRetries {
+				delay := c.retryInterval * time.Duration(retry+1)
+				fmt.Printf("Connection error getting result on attempt %d/%d: %v\n", retry+1, c.maxConnectionRetries+1, err)
+				fmt.Printf("Retrying in %v...\n", delay)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, fmt.Errorf("failed to get result after %d attempts: %w", c.maxConnectionRetries+1, err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("getResult failed: HTTP %d: %s", resp.StatusCode, string(b))
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("getResult failed: HTTP %d: %s", resp.StatusCode, string(b))
+		}
+
+		var pr predictionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+			return nil, err
+		}
+		if pr.Code != 200 {
+			return nil, fmt.Errorf("getResult failed: code %d message %s", pr.Code, pr.Message)
+		}
+		return &pr.Data, nil
 	}
 
-	var pr predictionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		return nil, err
-	}
-	if pr.Code != 200 {
-		return nil, fmt.Errorf("getResult failed: code %d message %s", pr.Code, pr.Message)
-	}
-	return &pr.Data, nil
+	return nil, fmt.Errorf("failed to get result after %d attempts: %w", c.maxConnectionRetries+1, lastErr)
 }
 
 func parseFloat(s string) (float64, error) {
