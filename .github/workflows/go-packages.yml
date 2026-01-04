@@ -1,0 +1,104 @@
+name: go-packages
+
+on:
+  # https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#running-a-workflow-when-a-pull-request-is-approved
+  # pull_request:
+  #   types:
+  #     - review_requested
+  #   branches:
+  #     - main
+  push:
+    branches:
+      - main
+    tags:
+      - "v[0-9]+*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # for tags
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.22'
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Verify dependencies
+      run: go mod verify
+
+    - name: Run go vet
+      run: go vet ./...
+
+    - name: Run tests
+      run: go test -v -race -coverprofile=coverage.out ./...
+      env:
+        WAVESPEED_API_KEY: ${{ secrets.WAVESPEED_API_KEY }}
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Check coverage
+      run: go tool cover -func=coverage.out
+
+  # publish to GitHub Release
+  gh_release:
+    name: gh_release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: write-all
+
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # create nightly release if it's a push to main
+      - if: github.repository == 'WaveSpeedAI/wavespeed-go' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        name: Nightly Release
+        uses: andelf/nightly-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: nightly
+          name: 'Nightly Release $$'
+          prerelease: true
+          body: |
+            Nightly build from main branch.
+
+            ## Installation
+            ```bash
+            go get github.com/WaveSpeedAI/wavespeed-go@nightly
+            ```
+
+      # create release if it's a tag like vx.y.z
+      - if: github.repository == 'WaveSpeedAI/wavespeed-go' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+        name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ github.ref_name }}
+          body: |
+            Release ${{ github.ref_name }}
+
+            ## Installation
+
+            ```bash
+            go get github.com/WaveSpeedAI/wavespeed-go@${{ github.ref_name }}
+            ```
+
+            ## Changes
+
+            See commit history for changes in this release.

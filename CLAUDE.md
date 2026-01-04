@@ -13,20 +13,17 @@ WaveSpeed Go SDK - Official Go SDK for WaveSpeedAI inference platform.
 # Run all tests
 go test -v ./...
 
-# Run tests with coverage
-go test -v -cover ./...
+# Run a single test file
+go test -v ./api
 
-# Run specific test
-go test -v -run TestClientRun
+# Run a specific test
+go test -v -run TestRunSuccess ./api
 ```
 
 ### Building
 ```bash
 # Build the package
 go build ./...
-
-# Install locally
-go install ./...
 ```
 
 ### Development
@@ -43,68 +40,62 @@ go mod tidy
 
 ## Architecture
 
-### Client Structure
+### API Client (`api/`)
 
-Entry point: `NewClient(apiKey string, opts *ClientOptions) (*Client, error)`
+Entry point: `import "github.com/WaveSpeedAI/wavespeed-go"`
 
 The SDK provides a simple client for running models:
 
 ```go
-client, err := wavespeed.NewClient("your-api-key")
-output, err := client.Run("model-id", input)
+output, err := wavespeed.Run("model-id", map[string]any{"input": "data"}, 0, 0, false, 0)
+outputs := output["outputs"].([]any)
 ```
+
+Key modules in `api/`:
+- `client.go` - Client implementation
+- `api.go` - Global Run and Upload functions
 
 ### Key Types
 
 - `Client` - Main client struct with configuration
-- `ClientOptions` - Options for client initialization
-- `RunOptions` - Options for individual run calls
-- `Prediction` - Response type containing outputs
+- `api.NewClient(apiKey, baseURL, connectionTimeout, maxRetries, maxConnectionRetries, retryInterval)` - Create new client
 
 ### Features
 
-- **Sync Mode**: Single request that waits for result (`EnableSyncMode`)
+- **Sync Mode**: Single request that waits for result
 - **Retry Logic**: Configurable task-level and connection-level retries
 - **Timeout Control**: Per-request and overall timeouts
 - **File Upload**: Direct file upload to WaveSpeed storage
 
 ### Configuration
 
-Client-level configuration via `ClientOptions`:
-- `BaseURL` - API base URL
-- `PollIntervalSeconds` - Polling interval
-- `TimeoutSeconds` - Overall timeout
-- `MaxRetries` - Task-level retries
-- `MaxConnectionRetries` - HTTP connection retries
-- `RetryInterval` - Base retry delay
+Client-level configuration via `api.NewClient`:
+- `apiKey` - API key (or from `WAVESPEED_API_KEY`)
+- `baseURL` - API base URL (default: https://api.wavespeed.ai)
+- `connectionTimeout` - Connection timeout in seconds (default: 10.0)
+- `maxRetries` - Task-level retries (default: 0)
+- `maxConnectionRetries` - HTTP connection retries (default: 5)
+- `retryInterval` - Base retry delay in seconds (default: 1.0)
 
-Per-request configuration via `RunOptions`:
-- `TimeoutSeconds` - Override timeout
-- `PollIntervalSeconds` - Override poll interval
-- `EnableSyncMode` - Use sync mode
-- `MaxRetries` - Override retry count
+Per-request configuration via Run parameters:
+- `timeout` - Override timeout
+- `pollInterval` - Override poll interval
+- `enableSyncMode` - Use sync mode
+- `maxRetries` - Override retry count
 
 ### Environment Variables
 
 - `WAVESPEED_API_KEY` - API key
-- `WAVESPEED_BASE_URL` - Base URL (default: https://api.wavespeed.ai)
-- `WAVESPEED_POLL_INTERVAL` - Poll interval in seconds
-- `WAVESPEED_TIMEOUT` - Timeout in seconds
 
 ## Testing
 
-Tests are located in `wavespeed_test.go` and cover:
+Tests are located in:
+- `config_test.go` - Configuration tests
+- `api/client_test.go` - API client tests
+
+Coverage:
 - Client initialization
 - Run method with different options
 - Sync mode
 - Retry logic
 - Upload functionality
-
-## Release Process
-
-This project uses Git tags for versioning. See VERSIONING.md for details.
-
-To create a release:
-1. Tag the version: `git tag v1.0.0`
-2. Push the tag: `git push origin v1.0.0`
-3. GitHub Actions will automatically create a release

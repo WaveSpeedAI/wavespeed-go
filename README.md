@@ -29,21 +29,18 @@ go get github.com/WaveSpeedAI/wavespeed-go
 Run WaveSpeed AI models with a simple API:
 
 ```go
-import wavespeed "github.com/WaveSpeedAI/wavespeed-go"
+import "github.com/WaveSpeedAI/wavespeed-go"
 
-client, err := wavespeed.NewClient("your-api-key")
+output, err := wavespeed.Run(
+    "wavespeed-ai/z-image/turbo",
+    map[string]any{"prompt": "Cat"},
+    0, 0, false, 0,
+)
 if err != nil {
-	log.Fatal(err)
+    log.Fatal(err)
 }
 
-output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
-	"prompt": "Cat",
-})
-if err != nil {
-	log.Fatal(err)
-}
-
-fmt.Println(output.Outputs[0])  // Output URL
+fmt.Println(output["outputs"].([]any)[0])  // Output URL
 ```
 
 ### Authentication
@@ -54,36 +51,44 @@ Set your API key via environment variable (You can get your API key from [https:
 export WAVESPEED_API_KEY="your-api-key"
 ```
 
-Or pass it directly when creating the client:
+Or pass it directly:
 
 ```go
-client, err := wavespeed.NewClient("your-api-key")
+import "github.com/WaveSpeedAI/wavespeed-go/api"
+
+client := api.NewClient("your-api-key", "", 0, 0, 0, 0)
+output, err := client.Run(
+    "wavespeed-ai/z-image/turbo",
+    map[string]any{"prompt": "Cat"},
+    0, 0, false, 0,
+)
 ```
 
 ### Options
 
 ```go
-output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
-	"prompt": "Cat",
-}, &wavespeed.RunOptions{
-	TimeoutSeconds:      36000, // Max wait time in seconds (default: 36000)
-	PollIntervalSeconds: 1,     // Status check interval (default: 1)
-	EnableSyncMode:      false, // Single request mode, no polling (default: false)
-})
+output, err := wavespeed.Run(
+    "wavespeed-ai/z-image/turbo",
+    map[string]any{"prompt": "Cat"},
+    36000.0,  // timeout: Max wait time in seconds (default: 36000.0)
+    1.0,      // pollInterval: Status check interval (default: 1.0)
+    false,    // enableSyncMode: Single request mode, no polling (default: false)
+    0,        // maxRetries: Maximum retries (default: 0)
+)
 ```
 
 ### Sync Mode
 
-Use `EnableSyncMode: true` for a single request that waits for the result (no polling).
+Use `enableSyncMode=true` for a single request that waits for the result (no polling).
 
 > **Note:** Not all models support sync mode. Check the model documentation for availability.
 
 ```go
-output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
-	"prompt": "Cat",
-}, &wavespeed.RunOptions{
-	EnableSyncMode: true,
-})
+output, err := wavespeed.Run(
+    "wavespeed-ai/z-image/turbo",
+    map[string]any{"prompt": "Cat"},
+    0, 0, true, 0,  // enableSyncMode=true
+)
 ```
 
 ### Retry Configuration
@@ -91,11 +96,16 @@ output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{
 Configure retries at the client level:
 
 ```go
-client, err := wavespeed.NewClient("your-api-key", &wavespeed.ClientOptions{
-	MaxRetries:           0, // Task-level retries (default: 0)
-	MaxConnectionRetries: 5, // HTTP connection retries (default: 5)
-	RetryInterval:        1, // Base delay between retries in seconds (default: 1)
-})
+import "github.com/WaveSpeedAI/wavespeed-go/api"
+
+client := api.NewClient(
+    "your-api-key",
+    "",       // baseURL (empty = default)
+    10.0,     // connectionTimeout in seconds (default: 10.0)
+    0,        // maxRetries: Task-level retries (default: 0)
+    5,        // maxConnectionRetries: HTTP connection retries (default: 5)
+    1.0,      // retryInterval: Base delay between retries in seconds (default: 1.0)
+)
 ```
 
 ### Upload Files
@@ -103,11 +113,26 @@ client, err := wavespeed.NewClient("your-api-key", &wavespeed.ClientOptions{
 Upload images, videos, or audio files:
 
 ```go
-url, err := client.Upload("/path/to/image.png")
+import "github.com/WaveSpeedAI/wavespeed-go"
+
+url, err := wavespeed.Upload("/path/to/image.png", 0)
 if err != nil {
-	log.Fatal(err)
+    log.Fatal(err)
 }
 fmt.Println(url)
+```
+
+## Running Tests
+
+```bash
+# Run all tests
+go test -v ./...
+
+# Run a single test file
+go test -v ./api
+
+# Run a specific test
+go test -v -run TestRunSuccess ./api
 ```
 
 ## Environment Variables
