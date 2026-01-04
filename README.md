@@ -55,7 +55,7 @@ Or pass it directly:
 ```go
 import "github.com/WaveSpeedAI/wavespeed-go/api"
 
-client := api.NewClient("your-api-key", "", 0, 0, 0, 0)
+client := api.NewClient(api.WithAPIKey("your-api-key"))
 output, err := client.Run(
     "wavespeed-ai/z-image/turbo",
     map[string]any{"prompt": "Cat"},
@@ -99,12 +99,10 @@ Configure retries at the client level:
 import "github.com/WaveSpeedAI/wavespeed-go/api"
 
 client := api.NewClient(
-    "your-api-key",
-    "",       // baseURL (empty = default)
-    10.0,     // connectionTimeout in seconds (default: 10.0)
-    0,        // maxRetries: Task-level retries (default: 0)
-    5,        // maxConnectionRetries: HTTP connection retries (default: 5)
-    1.0,      // retryInterval: Base delay between retries in seconds (default: 1.0)
+    api.WithAPIKey("your-api-key"),
+    api.WithClientMaxRetries(0),       // Task-level retries (default: 0)
+    api.WithMaxConnectionRetries(5),   // HTTP connection retries (default: 5)
+    api.WithRetryInterval(1.0),        // Base delay between retries in seconds (default: 1.0)
 )
 ```
 

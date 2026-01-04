@@ -15,6 +15,51 @@ import (
 	"time"
 )
 
+// ClientOption is a function that configures a Client.
+type ClientOption func(*Client)
+
+// WithAPIKey sets the API key for the client.
+func WithAPIKey(apiKey string) ClientOption {
+	return func(c *Client) {
+		c.apiKey = apiKey
+	}
+}
+
+// WithBaseURL sets the base URL for the client.
+func WithBaseURL(baseURL string) ClientOption {
+	return func(c *Client) {
+		c.baseURL = baseURL
+	}
+}
+
+// WithConnectionTimeout sets the connection timeout in seconds.
+func WithConnectionTimeout(timeout float64) ClientOption {
+	return func(c *Client) {
+		c.connectionTimeout = timeout
+	}
+}
+
+// WithClientMaxRetries sets the maximum number of task-level retries.
+func WithClientMaxRetries(maxRetries int) ClientOption {
+	return func(c *Client) {
+		c.maxRetries = maxRetries
+	}
+}
+
+// WithMaxConnectionRetries sets the maximum number of HTTP connection retries.
+func WithMaxConnectionRetries(maxRetries int) ClientOption {
+	return func(c *Client) {
+		c.maxConnectionRetries = maxRetries
+	}
+}
+
+// WithRetryInterval sets the base interval between retries in seconds.
+func WithRetryInterval(interval float64) ClientOption {
+	return func(c *Client) {
+		c.retryInterval = interval
+	}
+}
+
 // RunOption is a function that configures RunOptions.
 type RunOption func(*RunOptions)
 
@@ -110,34 +155,51 @@ type uploadResponse struct {
 	Data    map[string]interface{} `json:"data"`
 }
 
-// NewClient creates a new WaveSpeed API client.
-func NewClient(apiKey string, baseURL string, connectionTimeout float64, maxRetries int, maxConnectionRetries int, retryInterval float64) *Client {
-	if apiKey == "" {
-		apiKey = os.Getenv("WAVESPEED_API_KEY")
+// NewClient creates a new WaveSpeed API client with optional configuration.
+//
+// All parameters are optional and can be configured using functional options.
+// If not specified, the following defaults are used:
+//   - apiKey: from WAVESPEED_API_KEY environment variable
+//   - baseURL: "https://api.wavespeed.ai"
+//   - connectionTimeout: 10.0 seconds
+//   - maxRetries: 0 (no task-level retries)
+//   - maxConnectionRetries: 5
+//   - retryInterval: 1.0 second
+//
+// Example:
+//
+//	// With defaults (API key from environment)
+//	client := api.NewClient()
+//
+//	// With custom API key
+//	client := api.NewClient(api.WithAPIKey("your-api-key"))
+//
+//	// With multiple options
+//	client := api.NewClient(
+//	    api.WithAPIKey("your-api-key"),
+//	    api.WithClientMaxRetries(3),
+//	    api.WithRetryInterval(2.0),
+//	)
+func NewClient(opts ...ClientOption) *Client {
+	// Create client with default values
+	client := &Client{
+		apiKey:               os.Getenv("WAVESPEED_API_KEY"),
+		baseURL:              "https://api.wavespeed.ai",
+		connectionTimeout:    10.0,
+		maxRetries:           0,
+		maxConnectionRetries: 5,
+		retryInterval:        1.0,
 	}
-	if baseURL == "" {
-		baseURL = "https://api.wavespeed.ai"
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
 
-	if connectionTimeout == 0 {
-		connectionTimeout = 10.0
-	}
-	if maxConnectionRetries == 0 {
-		maxConnectionRetries = 5
-	}
-	if retryInterval == 0 {
-		retryInterval = 1.0
+	// Apply user-provided options
+	for _, opt := range opts {
+		opt(client)
 	}
 
-	return &Client{
-		apiKey:               apiKey,
-		baseURL:              baseURL,
-		connectionTimeout:    connectionTimeout,
-		maxRetries:           maxRetries,
-		maxConnectionRetries: maxConnectionRetries,
-		retryInterval:        retryInterval,
-	}
+	// Normalize baseURL
+	client.baseURL = strings.TrimRight(client.baseURL, "/")
+
+	return client
 }
 
 func (c *Client) getHeaders() (map[string]string, error) {

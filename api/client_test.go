@@ -12,7 +12,7 @@ import (
 )
 
 func TestInitWithAPIKey(t *testing.T) {
-	client := NewClient("test-key", "", 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"))
 	if client.apiKey != "test-key" {
 		t.Errorf("expected apiKey=test-key, got %s", client.apiKey)
 	}
@@ -22,14 +22,14 @@ func TestInitWithAPIKey(t *testing.T) {
 }
 
 func TestInitWithCustomBaseURL(t *testing.T) {
-	client := NewClient("test-key", "https://custom.api.com/", 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL("https://custom.api.com/"))
 	if client.baseURL != "https://custom.api.com" {
 		t.Errorf("expected baseURL=https://custom.api.com, got %s", client.baseURL)
 	}
 }
 
 func TestGetHeadersRaisesWithoutAPIKey(t *testing.T) {
-	client := NewClient("", "", 0, 0, 0, 0)
+	client := NewClient()
 	client.apiKey = ""
 	_, err := client.getHeaders()
 	if err == nil {
@@ -41,7 +41,7 @@ func TestGetHeadersRaisesWithoutAPIKey(t *testing.T) {
 }
 
 func TestGetHeadersReturnsAuthHeader(t *testing.T) {
-	client := NewClient("test-key", "", 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"))
 	headers, err := client.getHeaders()
 	if err != nil {
 		t.Fatalf("getHeaders error: %v", err)
@@ -63,7 +63,7 @@ func TestSubmitSuccess(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	requestID, result, err := client.submit("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, false, 0)
 	if err != nil {
 		t.Fatalf("submit error: %v", err)
@@ -85,7 +85,7 @@ func TestSubmitFailure(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, _, err := client.submit("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, false, 0)
 	if err == nil {
 		t.Fatal("expected error for HTTP 500")
@@ -104,7 +104,7 @@ func TestGetResultSuccess(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	result, err := client.getResult("req-123", 0)
 	if err != nil {
 		t.Fatalf("getResult error: %v", err)
@@ -131,7 +131,7 @@ func TestRunSuccess(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	result, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01))
 	if err != nil {
 		t.Fatalf("run error: %v", err)
@@ -161,7 +161,7 @@ func TestRunFailure(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01))
 	if err == nil {
 		t.Fatal("expected error for failed prediction")
@@ -205,7 +205,7 @@ func TestUploadFilePath(t *testing.T) {
 	}
 	defer os.Remove(tmpFile)
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	url, err := client.Upload(tmpFile)
 	if err != nil {
 		t.Fatalf("upload error: %v", err)
@@ -216,7 +216,7 @@ func TestUploadFilePath(t *testing.T) {
 }
 
 func TestUploadFileNotFound(t *testing.T) {
-	client := NewClient("test-key", "", 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"))
 	_, err := client.Upload("/nonexistent/path/to/file.png")
 	if err == nil {
 		t.Fatal("expected error for non-existent file")
@@ -227,7 +227,7 @@ func TestUploadFileNotFound(t *testing.T) {
 }
 
 func TestUploadRaisesWithoutAPIKey(t *testing.T) {
-	client := NewClient("", "", 0, 0, 0, 0)
+	client := NewClient()
 	client.apiKey = ""
 	_, err := client.Upload("/some/file.png")
 	if err == nil {
@@ -253,7 +253,7 @@ func TestUploadHTTPError(t *testing.T) {
 	}
 	defer os.Remove(tmpFile)
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.Upload(tmpFile)
 	if err == nil {
 		t.Fatal("expected error for HTTP 500")
@@ -278,7 +278,7 @@ func TestUploadAPIError(t *testing.T) {
 	}
 	defer os.Remove(tmpFile)
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.Upload(tmpFile)
 	if err == nil {
 		t.Fatal("expected error for API error response")
@@ -298,7 +298,7 @@ func TestRunSyncModeFailure(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithSyncMode(true))
 	if err == nil {
 		t.Fatal("expected error for non-completed status in sync mode")
@@ -328,7 +328,7 @@ func TestRunTimeout(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithTimeout(0.1), WithPollInterval(0.01))
 	if err == nil {
 		t.Fatal("expected timeout error")
@@ -474,7 +474,7 @@ func TestRunAllRetriesFailed(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 2, 0, 0.01) // maxRetries=2
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithClientMaxRetries(2), WithRetryInterval(0.01)) // maxRetries=2
 	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01), WithMaxRetries(2))
 
 	if err == nil {
@@ -500,7 +500,7 @@ func TestGetResultConnectionRetry(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 5, 0.01)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithMaxConnectionRetries(5), WithRetryInterval(0.01))
 	_, err := client.getResult("req-123", 0)
 
 	if err == nil {
@@ -518,7 +518,7 @@ func TestGetResultConnectionRetry(t *testing.T) {
 }
 
 func TestIsRetryableError(t *testing.T) {
-	client := NewClient("test-key", "", 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"))
 
 	tests := []struct {
 		name     string
@@ -560,7 +560,7 @@ func TestSubmitConnectionRetry(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 5, 0.01)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithMaxConnectionRetries(5), WithRetryInterval(0.01))
 	_, _, err := client.submit("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, false, 0)
 
 	if err == nil {
@@ -588,7 +588,7 @@ func TestWaitInvalidResponse(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.wait("req-123", 0.1, 0.01)
 
 	if err == nil {
@@ -609,7 +609,7 @@ func TestGetResultNon200Status(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.getResult("req-123", 0)
 
 	if err == nil {
@@ -635,7 +635,7 @@ func TestSubmitMissingRequestID(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, _, err := client.submit("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, false, 0)
 
 	if err == nil {
@@ -658,7 +658,7 @@ func TestWaitMissingStatus(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.wait("req-123", 0.1, 0.01)
 
 	if err == nil {

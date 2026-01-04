@@ -4,7 +4,7 @@ var defaultClient *Client
 
 func getDefaultClient() *Client {
 	if defaultClient == nil {
-		defaultClient = NewClient("", "", 0, 0, 0, 0)
+		defaultClient = NewClient()
 	}
 	return defaultClient
 }
