@@ -42,7 +42,15 @@ jobs:
     - name: Run go mod tidy check
       run: |
         go mod tidy
-        if ! git diff --exit-code go.mod go.sum; then
-          echo "go.mod or go.sum is not tidy. Run 'go mod tidy' to fix."
+        # Check if go.mod has changed (go.sum may not exist if no dependencies)
+        if ! git diff --exit-code go.mod; then
+          echo "go.mod is not tidy. Run 'go mod tidy' to fix."
           exit 1
+        fi
+        # Check go.sum only if it exists
+        if [ -f go.sum ]; then
+          if ! git diff --exit-code go.sum; then
+            echo "go.sum is not tidy. Run 'go mod tidy' to fix."
+            exit 1
+          fi
         fi
