@@ -132,7 +132,7 @@ func TestRunSuccess(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
-	result, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, 0, 0.01, false, 0)
+	result, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01))
 	if err != nil {
 		t.Fatalf("run error: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestRunFailure(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
-	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, 0, 0.01, false, 0)
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01))
 	if err == nil {
 		t.Fatal("expected error for failed prediction")
 	}
@@ -206,7 +206,7 @@ func TestUploadFilePath(t *testing.T) {
 	defer os.Remove(tmpFile)
 
 	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
-	url, err := client.Upload(tmpFile, 0)
+	url, err := client.Upload(tmpFile)
 	if err != nil {
 		t.Fatalf("upload error: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestUploadFilePath(t *testing.T) {
 
 func TestUploadFileNotFound(t *testing.T) {
 	client := NewClient("test-key", "", 0, 0, 0, 0)
-	_, err := client.Upload("/nonexistent/path/to/file.png", 0)
+	_, err := client.Upload("/nonexistent/path/to/file.png")
 	if err == nil {
 		t.Fatal("expected error for non-existent file")
 	}
@@ -229,7 +229,7 @@ func TestUploadFileNotFound(t *testing.T) {
 func TestUploadRaisesWithoutAPIKey(t *testing.T) {
 	client := NewClient("", "", 0, 0, 0, 0)
 	client.apiKey = ""
-	_, err := client.Upload("/some/file.png", 0)
+	_, err := client.Upload("/some/file.png")
 	if err == nil {
 		t.Fatal("expected error when no API key provided")
 	}
@@ -254,7 +254,7 @@ func TestUploadHTTPError(t *testing.T) {
 	defer os.Remove(tmpFile)
 
 	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
-	_, err := client.Upload(tmpFile, 0)
+	_, err := client.Upload(tmpFile)
 	if err == nil {
 		t.Fatal("expected error for HTTP 500")
 	}
@@ -279,7 +279,7 @@ func TestUploadAPIError(t *testing.T) {
 	defer os.Remove(tmpFile)
 
 	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
-	_, err := client.Upload(tmpFile, 0)
+	_, err := client.Upload(tmpFile)
 	if err == nil {
 		t.Fatal("expected error for API error response")
 	}
@@ -299,7 +299,7 @@ func TestRunSyncModeFailure(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
-	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, 0, 0, true, 0)
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithSyncMode(true))
 	if err == nil {
 		t.Fatal("expected error for non-completed status in sync mode")
 	}
@@ -329,7 +329,7 @@ func TestRunTimeout(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, 0, 0, 0, 0)
-	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, 0.1, 0.01, false, 0)
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithTimeout(0.1), WithPollInterval(0.01))
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -366,7 +366,7 @@ func TestRunUsesDefaultClient(t *testing.T) {
 	defaultClient = nil
 
 	// Use module-level Run function
-	result, err := Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, 0, 0.01, false, 0)
+	result, err := Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01))
 	if err != nil {
 		// This will fail because we can't override the base URL for the default client
 		// But we're testing that it attempts to use the default client
@@ -395,7 +395,6 @@ func TestRunRealAPI(t *testing.T) {
 	output, err := Run(
 		"wavespeed-ai/z-image/turbo",
 		map[string]any{"prompt": "A simple red circle on white background"},
-		0, 0, false, 0,
 	)
 	if err != nil {
 		t.Fatalf("run error: %v", err)
@@ -450,7 +449,7 @@ func TestUploadRealAPI(t *testing.T) {
 	}
 	defer os.Remove(tmpFile)
 
-	url, err := Upload(tmpFile, 0)
+	url, err := Upload(tmpFile)
 	if err != nil {
 		t.Fatalf("upload error: %v", err)
 	}
@@ -476,7 +475,7 @@ func TestRunAllRetriesFailed(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, 0, 2, 0, 0.01) // maxRetries=2
-	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, 0, 0.01, false, 2)
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01), WithMaxRetries(2))
 
 	if err == nil {
 		t.Fatal("expected error after all retries failed")

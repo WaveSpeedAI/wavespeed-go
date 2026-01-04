@@ -15,6 +15,60 @@ import (
 	"time"
 )
 
+// RunOption is a function that configures RunOptions.
+type RunOption func(*RunOptions)
+
+// RunOptions contains optional parameters for Run.
+type RunOptions struct {
+	Timeout        float64
+	PollInterval   float64
+	EnableSyncMode bool
+	MaxRetries     int
+}
+
+// WithTimeout sets the maximum time to wait for completion.
+func WithTimeout(timeout float64) RunOption {
+	return func(o *RunOptions) {
+		o.Timeout = timeout
+	}
+}
+
+// WithPollInterval sets the interval between status checks.
+func WithPollInterval(interval float64) RunOption {
+	return func(o *RunOptions) {
+		o.PollInterval = interval
+	}
+}
+
+// WithSyncMode enables or disables synchronous mode.
+func WithSyncMode(enable bool) RunOption {
+	return func(o *RunOptions) {
+		o.EnableSyncMode = enable
+	}
+}
+
+// WithMaxRetries sets the maximum number of task-level retries.
+func WithMaxRetries(retries int) RunOption {
+	return func(o *RunOptions) {
+		o.MaxRetries = retries
+	}
+}
+
+// UploadOption is a function that configures UploadOptions.
+type UploadOption func(*UploadOptions)
+
+// UploadOptions contains optional parameters for Upload.
+type UploadOptions struct {
+	Timeout float64
+}
+
+// WithUploadTimeout sets the timeout for file upload.
+func WithUploadTimeout(timeout float64) UploadOption {
+	return func(o *UploadOptions) {
+		o.Timeout = timeout
+	}
+}
+
 // Client is the WaveSpeed API client.
 type Client struct {
 	apiKey               string
@@ -314,17 +368,24 @@ func (c *Client) isRetryableError(err error) bool {
 }
 
 // Run executes a model and waits for the output.
-func (c *Client) Run(model string, input map[string]any, timeout float64, pollInterval float64, enableSyncMode bool, maxRetries int) (map[string]any, error) {
-	if timeout == 0 {
-		timeout = 36000.0
+func (c *Client) Run(model string, input map[string]any, opts ...RunOption) (map[string]any, error) {
+	// Apply default options
+	options := &RunOptions{
+		Timeout:        36000.0,
+		PollInterval:   1.0,
+		EnableSyncMode: false,
+		MaxRetries:     c.maxRetries,
 	}
-	if pollInterval == 0 {
-		pollInterval = 1.0
+
+	// Apply user-provided options
+	for _, opt := range opts {
+		opt(options)
 	}
-	taskRetries := maxRetries
-	if taskRetries == 0 {
-		taskRetries = c.maxRetries
-	}
+
+	timeout := options.Timeout
+	pollInterval := options.PollInterval
+	enableSyncMode := options.EnableSyncMode
+	taskRetries := options.MaxRetries
 
 	var lastError error
 
@@ -381,19 +442,26 @@ func (c *Client) Run(model string, input map[string]any, timeout float64, pollIn
 }
 
 // Upload uploads a file to WaveSpeed.
-func (c *Client) Upload(file string, timeout float64) (string, error) {
+func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 	if c.apiKey == "" {
 		return "", errors.New("API key is required. Set WAVESPEED_API_KEY environment variable or pass api_key to Client()")
+	}
+
+	// Apply default options
+	options := &UploadOptions{
+		Timeout: 36000.0,
+	}
+
+	// Apply user-provided options
+	for _, opt := range opts {
+		opt(options)
 	}
 
 	url := c.baseURL + "/api/v3/media/upload/binary"
 	headers := map[string]string{
 		"Authorization": "Bearer " + c.apiKey,
 	}
-	requestTimeout := timeout
-	if requestTimeout == 0 {
-		requestTimeout = 36000.0
-	}
+	requestTimeout := options.Timeout
 
 	if _, err := os.Stat(file); os.IsNotExist(err) {
 		return "", fmt.Errorf("file not found: %s", file)

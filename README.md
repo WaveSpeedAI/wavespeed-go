@@ -34,7 +34,6 @@ import "github.com/WaveSpeedAI/wavespeed-go"
 output, err := wavespeed.Run(
     "wavespeed-ai/z-image/turbo",
     map[string]any{"prompt": "Cat"},
-    0, 0, false, 0,
 )
 if err != nil {
     log.Fatal(err)
@@ -60,26 +59,27 @@ client := api.NewClient("your-api-key", "", 0, 0, 0, 0)
 output, err := client.Run(
     "wavespeed-ai/z-image/turbo",
     map[string]any{"prompt": "Cat"},
-    0, 0, false, 0,
 )
 ```
 
 ### Options
 
+All parameters are optional. Use option functions to customize behavior:
+
 ```go
 output, err := wavespeed.Run(
     "wavespeed-ai/z-image/turbo",
     map[string]any{"prompt": "Cat"},
-    36000.0,  // timeout: Max wait time in seconds (default: 36000.0)
-    1.0,      // pollInterval: Status check interval (default: 1.0)
-    false,    // enableSyncMode: Single request mode, no polling (default: false)
-    0,        // maxRetries: Maximum retries (default: 0)
+    wavespeed.WithTimeout(60),           // Max wait time in seconds
+    wavespeed.WithPollInterval(1.0),     // Status check interval
+    wavespeed.WithSyncMode(true),        // Enable synchronous mode
+    wavespeed.WithMaxRetries(3),         // Maximum task retries
 )
 ```
 
 ### Sync Mode
 
-Use `enableSyncMode=true` for a single request that waits for the result (no polling).
+Use `WithSyncMode(true)` for a single request that waits for the result (no polling).
 
 > **Note:** Not all models support sync mode. Check the model documentation for availability.
 
@@ -87,7 +87,7 @@ Use `enableSyncMode=true` for a single request that waits for the result (no pol
 output, err := wavespeed.Run(
     "wavespeed-ai/z-image/turbo",
     map[string]any{"prompt": "Cat"},
-    0, 0, true, 0,  // enableSyncMode=true
+    wavespeed.WithSyncMode(true),
 )
 ```
 
@@ -115,11 +115,15 @@ Upload images, videos, or audio files:
 ```go
 import "github.com/WaveSpeedAI/wavespeed-go"
 
-url, err := wavespeed.Upload("/path/to/image.png", 0)
+// Simple upload
+url, err := wavespeed.Upload("/path/to/image.png")
 if err != nil {
     log.Fatal(err)
 }
 fmt.Println(url)
+
+// With timeout
+url, err := wavespeed.Upload("/path/to/image.png", wavespeed.WithUploadTimeout(30))
 ```
 
 ## Running Tests

@@ -14,42 +14,48 @@ func getDefaultClient() *Client {
 // Args:
 //   - model: Model identifier (e.g., "wavespeed-ai/flux-dev").
 //   - input: Input parameters for the model.
-//   - timeout: Maximum time to wait for completion (0 = no timeout).
-//   - pollInterval: Interval between status checks in seconds.
-//   - enableSyncMode: If true, use synchronous mode (single request).
-//   - maxRetries: Maximum retries for this request (overrides default setting).
+//   - opts: Optional parameters (WithTimeout, WithSyncMode, etc.)
 //
 // Returns:
 //   - map[string]any containing "outputs" array with model outputs.
 //
 // Example:
 //
-//	output := api.Run(
+//	// Simple usage
+//	output, _ := api.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "Cat"})
+//	fmt.Println(output["outputs"].([]any)[0])
+//
+//	// With options
+//	output, _ := api.Run(
 //	    "wavespeed-ai/z-image/turbo",
 //	    map[string]any{"prompt": "Cat"},
-//	    0, 1.0, false, 0,
+//	    api.WithSyncMode(true),
+//	    api.WithTimeout(60),
 //	)
-//	fmt.Println(output["outputs"].([]any)[0])
-func Run(model string, input map[string]any, timeout float64, pollInterval float64, enableSyncMode bool, maxRetries int) (map[string]any, error) {
-	return getDefaultClient().Run(model, input, timeout, pollInterval, enableSyncMode, maxRetries)
+func Run(model string, input map[string]any, opts ...RunOption) (map[string]any, error) {
+	return getDefaultClient().Run(model, input, opts...)
 }
 
 // Upload uploads a file to WaveSpeed.
 //
 // Args:
 //   - file: File path string to upload.
-//   - timeout: Total API call timeout in seconds.
+//   - opts: Optional upload options (WithUploadTimeout, etc.)
 //
 // Returns:
 //   - URL of the uploaded file.
 //
 // Example:
 //
-//	url, err := api.Upload("/path/to/image.png", 0)
+//	// Simple usage
+//	url, err := api.Upload("/path/to/image.png")
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //	fmt.Println(url)
-func Upload(file string, timeout float64) (string, error) {
-	return getDefaultClient().Upload(file, timeout)
+//
+//	// With timeout
+//	url, err := api.Upload("/path/to/image.png", api.WithUploadTimeout(30))
+func Upload(file string, opts ...UploadOption) (string, error) {
+	return getDefaultClient().Upload(file, opts...)
 }
