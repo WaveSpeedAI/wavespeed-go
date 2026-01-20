@@ -18,6 +18,10 @@
 
 ---
 
+## Introduction
+
+**WaveSpeedAI** Go Client — Official Go SDK for **WaveSpeedAI** inference platform. This library provides a clean, type-safe, and high-performance API for your applications.
+
 ## Installation
 
 ```bash
