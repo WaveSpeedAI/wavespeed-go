@@ -128,6 +128,22 @@ fmt.Println(url)
 url, err := wavespeed.Upload("/path/to/image.png", wavespeed.WithUploadTimeout(30))
 ```
 
+### Getting Task ID and Debug Information
+
+If you need access to the task ID for logging, tracking, or debugging, use `RunNoThrow()` instead of `Run()`. This method returns detailed information and does not return errors:
+
+```go
+result := client.RunNoThrow(model, input)
+
+if result.Outputs != nil {
+    fmt.Println("Success:", result.Outputs)
+    fmt.Println("Task ID:", result.Detail.TaskID)  // For tracking/debugging
+} else {
+    fmt.Println("Failed:", result.Detail.Error)
+    fmt.Println("Task ID:", result.Detail.TaskID)  // Still available on failure
+}
+```
+
 ## Running Tests
 
 ```bash

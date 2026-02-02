@@ -503,6 +503,191 @@ func (c *Client) Run(model string, input map[string]any, opts ...RunOption) (map
 	return nil, fmt.Errorf("all %d attempts failed", taskRetries+1)
 }
 
+// RunDetail contains detailed information about a task execution.
+type RunDetail struct {
+	TaskID    string `json:"taskId"`
+	Status    string `json:"status"`
+	Model     string `json:"model"`
+	Error     string `json:"error,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+// RunNoThrowResult is the result of RunNoThrow method.
+type RunNoThrowResult struct {
+	Outputs []any     `json:"outputs"`
+	Detail  RunDetail `json:"detail"`
+}
+
+// RunNoThrow executes a model and waits for the output (no-throw version).
+//
+// This method is similar to Run() but does not return errors for task failures.
+// Instead, it returns a result object with outputs (nil on failure) and detail information.
+// The detail object always contains the taskId, which is useful for debugging and tracking.
+//
+// Example:
+//
+//	result := client.RunNoThrow("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "Cat"})
+//
+//	if result.Outputs != nil {
+//	    fmt.Println("Success:", result.Outputs)
+//	    fmt.Println("Task ID:", result.Detail.TaskID)
+//	} else {
+//	    fmt.Println("Failed:", result.Detail.Error)
+//	    fmt.Println("Task ID:", result.Detail.TaskID)
+//	}
+func (c *Client) RunNoThrow(model string, input map[string]any, opts ...RunOption) *RunNoThrowResult {
+	// Apply default options
+	options := &RunOptions{
+		Timeout:        36000.0,
+		PollInterval:   1.0,
+		EnableSyncMode: false,
+		MaxRetries:     c.maxRetries,
+	}
+
+	// Apply user-provided options
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	timeout := options.Timeout
+	pollInterval := options.PollInterval
+	enableSyncMode := options.EnableSyncMode
+	taskRetries := options.MaxRetries
+
+	for attempt := 0; attempt <= taskRetries; attempt++ {
+		requestID, syncResult, err := c.submit(model, input, enableSyncMode, timeout)
+		if err == nil {
+			if enableSyncMode {
+				// In sync mode, extract outputs from the result
+				data, ok := syncResult["data"].(map[string]any)
+				if !ok {
+					return &RunNoThrowResult{
+						Outputs: nil,
+						Detail: RunDetail{
+							TaskID: "unknown",
+							Status: "failed",
+							Model:  model,
+							Error:  "Invalid response format",
+						},
+					}
+				}
+
+				status, _ := data["status"].(string)
+				taskID, _ := data["id"].(string)
+				if taskID == "" {
+					taskID = "unknown"
+				}
+
+				if status != "completed" {
+					errorMsg := "Unknown error"
+					if e, ok := data["error"].(string); ok && e != "" {
+						errorMsg = e
+					}
+					createdAt, _ := data["created_at"].(string)
+					return &RunNoThrowResult{
+						Outputs: nil,
+						Detail: RunDetail{
+							TaskID:    taskID,
+							Status:    "failed",
+							Model:     model,
+							Error:     errorMsg,
+							CreatedAt: createdAt,
+						},
+					}
+				}
+
+				outputs, ok := data["outputs"].([]any)
+				if !ok {
+					outputs = []any{}
+				}
+				createdAt, _ := data["created_at"].(string)
+				return &RunNoThrowResult{
+					Outputs: outputs,
+					Detail: RunDetail{
+						TaskID:    taskID,
+						Status:    "completed",
+						Model:     model,
+						CreatedAt: createdAt,
+					},
+				}
+			}
+
+			// Async mode
+			result, err := c.wait(requestID, timeout, pollInterval)
+			if err == nil {
+				outputs, ok := result["outputs"].([]any)
+				if !ok {
+					outputs = []any{}
+				}
+				return &RunNoThrowResult{
+					Outputs: outputs,
+					Detail: RunDetail{
+						TaskID: requestID,
+						Status: "completed",
+						Model:  model,
+					},
+				}
+			}
+
+			// Wait failed, but we have taskID
+			return &RunNoThrowResult{
+				Outputs: nil,
+				Detail: RunDetail{
+					TaskID: requestID,
+					Status: "failed",
+					Model:  model,
+					Error:  err.Error(),
+				},
+			}
+		}
+
+		// Submit failed
+		isRetryable := c.isRetryableError(err)
+
+		if !isRetryable || attempt >= taskRetries {
+			// Try to extract taskID from error message
+			taskID := "unknown"
+			errStr := err.Error()
+			if idx := strings.Index(errStr, "task_id: "); idx != -1 {
+				start := idx + 9
+				end := start
+				for end < len(errStr) && (errStr[end] != ')' && errStr[end] != ' ' && errStr[end] != '\n') {
+					end++
+				}
+				if end > start {
+					taskID = errStr[start:end]
+				}
+			}
+
+			return &RunNoThrowResult{
+				Outputs: nil,
+				Detail: RunDetail{
+					TaskID: taskID,
+					Status: "failed",
+					Model:  model,
+					Error:  err.Error(),
+				},
+			}
+		}
+
+		delay := c.retryInterval * float64(attempt+1)
+		fmt.Printf("Task attempt %d/%d failed: %v\n", attempt+1, taskRetries+1, err)
+		fmt.Printf("Retrying in %.1f seconds...\n", delay)
+		time.Sleep(time.Duration(delay * float64(time.Second)))
+	}
+
+	// Should not reach here
+	return &RunNoThrowResult{
+		Outputs: nil,
+		Detail: RunDetail{
+			TaskID: "unknown",
+			Status: "failed",
+			Model:  model,
+			Error:  fmt.Sprintf("All %d attempts failed", taskRetries+1),
+		},
+	}
+}
+
 // Upload uploads a file to WaveSpeed.
 func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 	if c.apiKey == "" {
