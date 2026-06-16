@@ -314,6 +314,70 @@ func TestRunSyncModeFailure(t *testing.T) {
 	}
 }
 
+func TestRunSyncModeTimeoutQueryableError(t *testing.T) {
+	resultURL := "https://api.wavespeed.ai/api/v3/predictions/req-timeout/result"
+	resultHits := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"code":200,"data":{"id":"req-timeout","status":"processing","code":5004,"error":"Sync mode timed out after 90 seconds. The prediction is still processing asynchronously.","urls":{"get":"` + resultURL + `"},"outputs":[]}}`))
+	})
+	mux.HandleFunc("/api/v3/predictions/req-timeout/result", func(w http.ResponseWriter, r *http.Request) {
+		resultHits++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"code":200,"data":{"id":"req-timeout","status":"completed","outputs":[]}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithSyncMode(true), WithMaxRetries(1))
+	if err == nil {
+		t.Fatal("expected sync timeout error")
+	}
+	if !strings.Contains(err.Error(), "sync mode timed out") {
+		t.Errorf("expected 'sync mode timed out' in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "req-timeout") {
+		t.Errorf("expected task id in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), resultURL) {
+		t.Errorf("expected result URL in error, got: %v", err)
+	}
+	if resultHits != 0 {
+		t.Errorf("expected no result polling in sync mode timeout, got %d hits", resultHits)
+	}
+}
+
+func TestRunNoThrowSyncModeTimeoutReturnsProcessing(t *testing.T) {
+	resultURL := "https://api.wavespeed.ai/api/v3/predictions/req-timeout/result"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"code":200,"data":{"id":"req-timeout","status":"processing","code":5004,"error":"Sync mode timed out after 90 seconds. The prediction is still processing asynchronously.","urls":{"get":"` + resultURL + `"},"outputs":[]}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
+	result := client.RunNoThrow("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithSyncMode(true))
+	if result.Outputs != nil {
+		t.Fatalf("expected nil outputs, got %+v", result.Outputs)
+	}
+	if result.Detail.Status != "processing" {
+		t.Errorf("expected status=processing, got %s", result.Detail.Status)
+	}
+	if result.Detail.TaskID != "req-timeout" {
+		t.Errorf("expected task id, got %s", result.Detail.TaskID)
+	}
+	if result.Detail.ResultURL != resultURL {
+		t.Errorf("expected result URL, got %s", result.Detail.ResultURL)
+	}
+	if !strings.Contains(result.Detail.Error, "sync mode timed out") {
+		t.Errorf("expected sync timeout error, got %s", result.Detail.Error)
+	}
+}
+
 func TestRunTimeout(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {

@@ -135,12 +135,15 @@ type ClientOptions struct {
 }
 
 type prediction struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Status  string `json:"status"`
-	Input   any    `json:"input"`
-	Outputs []any  `json:"outputs"`
-	Error   string `json:"error"`
+	ID        string            `json:"id"`
+	Model     string            `json:"model"`
+	Status    string            `json:"status"`
+	Input     any               `json:"input"`
+	Outputs   []any             `json:"outputs"`
+	Error     string            `json:"error"`
+	Code      int               `json:"code"`
+	CreatedAt string            `json:"created_at"`
+	URLs      map[string]string `json:"urls"`
 }
 
 type predictionResponse struct {
@@ -288,10 +291,13 @@ func (c *Client) submit(model string, input map[string]any, enableSyncMode bool,
 		if enableSyncMode {
 			return "", map[string]any{
 				"data": map[string]any{
-					"id":      result.Data.ID,
-					"status":  result.Data.Status,
-					"error":   result.Data.Error,
-					"outputs": result.Data.Outputs,
+					"id":         result.Data.ID,
+					"status":     result.Data.Status,
+					"error":      result.Data.Error,
+					"outputs":    result.Data.Outputs,
+					"code":       result.Data.Code,
+					"created_at": result.Data.CreatedAt,
+					"urls":       result.Data.URLs,
 				},
 			}, nil
 		}
@@ -423,10 +429,66 @@ func (c *Client) isRetryableError(err error) bool {
 	}
 
 	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "sync mode timed out") {
+		return false
+	}
 	return strings.Contains(errStr, "timeout") ||
 		strings.Contains(errStr, "connection") ||
 		strings.Contains(errStr, "http 5") ||
 		strings.Contains(errStr, "429")
+}
+
+func syncResultURL(data map[string]any) string {
+	switch urls := data["urls"].(type) {
+	case map[string]string:
+		return urls["get"]
+	case map[string]any:
+		if resultURL, ok := urls["get"].(string); ok {
+			return resultURL
+		}
+	}
+	return ""
+}
+
+func syncResultCode(data map[string]any) int {
+	switch code := data["code"].(type) {
+	case int:
+		return code
+	case int64:
+		return int(code)
+	case float64:
+		return int(code)
+	}
+	return 0
+}
+
+func isSyncTimeoutData(data map[string]any) bool {
+	errorMsg, _ := data["error"].(string)
+	status, _ := data["status"].(string)
+	return syncResultCode(data) == 5004 ||
+		(status == "processing" && strings.Contains(errorMsg, "Sync mode timed out"))
+}
+
+func syncModeError(data map[string]any) error {
+	errorMsg := "Unknown error"
+	if e, ok := data["error"].(string); ok && e != "" {
+		errorMsg = e
+	}
+
+	requestID := "unknown"
+	if id, ok := data["id"].(string); ok && id != "" {
+		requestID = id
+	}
+
+	if isSyncTimeoutData(data) {
+		message := fmt.Sprintf("sync mode timed out (task_id: %s): %s", requestID, errorMsg)
+		if resultURL := syncResultURL(data); resultURL != "" && !strings.Contains(message, resultURL) {
+			message += " Query the result later at: " + resultURL
+		}
+		return errors.New(message)
+	}
+
+	return fmt.Errorf("prediction failed (task_id: %s): %s", requestID, errorMsg)
 }
 
 // Run executes a model and waits for the output.
@@ -463,15 +525,7 @@ func (c *Client) Run(model string, input map[string]any, opts ...RunOption) (map
 
 				status, _ := data["status"].(string)
 				if status != "completed" {
-					errorMsg := "Unknown error"
-					if e, ok := data["error"].(string); ok && e != "" {
-						errorMsg = e
-					}
-					requestIDStr := "unknown"
-					if id, ok := data["id"].(string); ok && id != "" {
-						requestIDStr = id
-					}
-					return nil, fmt.Errorf("prediction failed (task_id: %s): %s", requestIDStr, errorMsg)
+					return nil, syncModeError(data)
 				}
 
 				outputs, ok := data["outputs"]
@@ -510,6 +564,7 @@ type RunDetail struct {
 	Model     string `json:"model"`
 	Error     string `json:"error,omitempty"`
 	CreatedAt string `json:"createdAt,omitempty"`
+	ResultURL string `json:"resultUrl,omitempty"`
 }
 
 // RunNoThrowResult is the result of RunNoThrow method.
@@ -584,14 +639,21 @@ func (c *Client) RunNoThrow(model string, input map[string]any, opts ...RunOptio
 						errorMsg = e
 					}
 					createdAt, _ := data["created_at"].(string)
+					resultURL := syncResultURL(data)
+					detailStatus := "failed"
+					if isSyncTimeoutData(data) {
+						detailStatus = "processing"
+						errorMsg = syncModeError(data).Error()
+					}
 					return &RunNoThrowResult{
 						Outputs: nil,
 						Detail: RunDetail{
 							TaskID:    taskID,
-							Status:    "failed",
+							Status:    detailStatus,
 							Model:     model,
 							Error:     errorMsg,
 							CreatedAt: createdAt,
+							ResultURL: resultURL,
 						},
 					}
 				}
