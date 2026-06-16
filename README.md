@@ -76,14 +76,16 @@ output, err := wavespeed.Run(
     map[string]any{"prompt": "Cat"},
     wavespeed.WithTimeout(60),           // Max wait time in seconds
     wavespeed.WithPollInterval(1.0),     // Status check interval
-    wavespeed.WithSyncMode(true),        // Enable synchronous mode
+    wavespeed.WithSyncMode(true),        // Best-effort sync result attempt
     wavespeed.WithMaxRetries(3),         // Maximum task retries
 )
 ```
 
 ### Sync Mode
 
-Use `WithSyncMode(true)` for a single request that waits for the result (no polling).
+Use `WithSyncMode(true)` to ask the API to wait for the result in the initial
+request. If the server-side sync wait times out, the SDK returns an error with
+the task ID/result URL; the task continues processing and can be queried later.
 
 > **Note:** Not all models support sync mode. Check the model documentation for availability.
 
