@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -153,9 +153,20 @@ type predictionResponse struct {
 }
 
 type uploadResponse struct {
-	Code    int                    `json:"code"`
-	Message string                 `json:"message"`
-	Data    map[string]interface{} `json:"data"`
+	Code    int        `json:"code"`
+	Message string     `json:"message"`
+	Data    uploadData `json:"data"`
+}
+
+type uploadData struct {
+	DownloadURL string            `json:"download_url"`
+	Upload      uploadInstruction `json:"upload"`
+}
+
+type uploadInstruction struct {
+	Method  string            `json:"method"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
 }
 
 // NewClient creates a new WaveSpeed API client with optional configuration.
@@ -766,53 +777,41 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 		opt(options)
 	}
 
-	url := c.baseURL + "/api/v3/media/upload/binary"
-	headers := map[string]string{
-		"Authorization": "Bearer " + c.apiKey,
-	}
+	url := c.baseURL + "/api/v3/media/uploads"
 	requestTimeout := options.Timeout
 
-	if _, err := os.Stat(file); os.IsNotExist(err) {
+	fileInfo, err := os.Stat(file)
+	if os.IsNotExist(err) {
 		return "", fmt.Errorf("file not found: %s", file)
 	}
-
-	f, err := os.Open(file)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
 
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-	part, err := writer.CreateFormFile("file", filepath.Base(file))
+	payload := map[string]any{
+		"filename": filepath.Base(file),
+		"size":     fileInfo.Size(),
+	}
+	if contentType := mime.TypeByExtension(filepath.Ext(file)); contentType != "" {
+		payload["content_type"] = contentType
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
-	}
-	if _, err = io.Copy(part, f); err != nil {
-		return "", err
-	}
-	if err = writer.Close(); err != nil {
 		return "", err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(requestTimeout*float64(time.Second)))
 	defer cancel()
 
-	req, err := http.NewRequest("POST", url, &buf)
+	ticketReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
-	req = req.WithContext(ctx)
+	ticketReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	ticketReq.Header.Set("Content-Type", "application/json")
 
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	client := &http.Client{
-		Timeout: time.Duration(requestTimeout * float64(time.Second)),
-	}
-	resp, err := client.Do(req)
+	client := &http.Client{Timeout: time.Duration(requestTimeout * float64(time.Second))}
+	resp, err := client.Do(ticketReq)
 	if err != nil {
 		return "", err
 	}
@@ -820,7 +819,7 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 
 	if resp.StatusCode != 200 {
 		bodyText, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("failed to upload file: HTTP %d: %s", resp.StatusCode, string(bodyText))
+		return "", fmt.Errorf("failed to create upload: HTTP %d: %s", resp.StatusCode, string(bodyText))
 	}
 
 	var result uploadResponse
@@ -831,11 +830,37 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 	if result.Code != 200 {
 		return "", fmt.Errorf("upload failed: %s", result.Message)
 	}
-
-	downloadURL, ok := result.Data["download_url"]
-	if !ok {
+	if result.Data.DownloadURL == "" || result.Data.Upload.URL == "" {
 		return "", errors.New("upload failed: no download_url in response")
 	}
 
-	return fmt.Sprint(downloadURL), nil
+	f, err := os.Open(file)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	method := result.Data.Upload.Method
+	if method == "" {
+		method = http.MethodPut
+	}
+	uploadReq, err := http.NewRequestWithContext(ctx, method, result.Data.Upload.URL, f)
+	if err != nil {
+		return "", err
+	}
+	uploadReq.ContentLength = fileInfo.Size()
+	for key, value := range result.Data.Upload.Headers {
+		uploadReq.Header.Set(key, value)
+	}
+	uploadResp, err := client.Do(uploadReq)
+	if err != nil {
+		return "", err
+	}
+	defer uploadResp.Body.Close()
+	if uploadResp.StatusCode < 200 || uploadResp.StatusCode >= 300 {
+		bodyText, _ := io.ReadAll(uploadResp.Body)
+		return "", fmt.Errorf("failed to upload file: HTTP %d: %s", uploadResp.StatusCode, string(bodyText))
+	}
+
+	return result.Data.DownloadURL, nil
 }

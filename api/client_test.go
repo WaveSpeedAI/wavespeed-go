@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -173,31 +175,35 @@ func TestRunFailure(t *testing.T) {
 
 func TestUploadFilePath(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/media/upload/binary", func(w http.ResponseWriter, r *http.Request) {
+	var serverURL string
+	mux.HandleFunc("/api/v3/media/uploads", func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			http.Error(w, "no auth", http.StatusUnauthorized)
 			return
 		}
-		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			http.Error(w, "bad form", http.StatusBadRequest)
-			return
-		}
-		f, _, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, "no file", http.StatusBadRequest)
-			return
-		}
-		defer f.Close()
-		content, _ := io.ReadAll(f)
-		if string(content) != "fake image data" {
-			http.Error(w, "bad content", http.StatusBadRequest)
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload["size"] != float64(len("fake image data")) {
+			http.Error(w, "bad ticket", http.StatusBadRequest)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"code":200,"message":"success","data":{"type":"image","download_url":"https://example.com/uploaded.png","filename":"test.png","size":1024}}`))
+		fmt.Fprintf(w, `{"code":200,"message":"success","data":{"download_url":"https://example.com/uploaded.png","upload":{"method":"PUT","url":%q,"headers":{"Content-Type":"image/png"}}}}`, serverURL+"/storage-upload")
+	})
+	mux.HandleFunc("/storage-upload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			http.Error(w, "credentials leaked", http.StatusBadRequest)
+			return
+		}
+		content, _ := io.ReadAll(r.Body)
+		if r.Method != http.MethodPut || string(content) != "fake image data" {
+			http.Error(w, "bad upload", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
+	serverURL = server.URL
 
 	tmpFile := filepath.Join(os.TempDir(), "wavespeed-test.png")
 	if err := os.WriteFile(tmpFile, []byte("fake image data"), 0644); err != nil {
@@ -240,7 +246,7 @@ func TestUploadRaisesWithoutAPIKey(t *testing.T) {
 
 func TestUploadHTTPError(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/media/upload/binary", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v3/media/uploads", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Internal Server Error"))
 	})
@@ -265,7 +271,7 @@ func TestUploadHTTPError(t *testing.T) {
 
 func TestUploadAPIError(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/media/upload/binary", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v3/media/uploads", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"code":500,"message":"Upload failed: invalid file type"}`))
 	})
