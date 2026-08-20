@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -53,6 +54,56 @@ func TestGetHeadersReturnsAuthHeader(t *testing.T) {
 	}
 	if headers["Content-Type"] != "application/json" {
 		t.Errorf("expected Content-Type header, got %s", headers["Content-Type"])
+	}
+	if headers["X-Client-Name"] != "wavespeed-go" {
+		t.Errorf("expected X-Client-Name=wavespeed-go, got %s", headers["X-Client-Name"])
+	}
+	if headers["X-Client-Version"] != Version {
+		t.Errorf("expected X-Client-Version=%s, got %s", Version, headers["X-Client-Version"])
+	}
+	if headers["X-Client-OS"] != runtime.GOOS {
+		t.Errorf("expected X-Client-OS=%s, got %s", runtime.GOOS, headers["X-Client-OS"])
+	}
+}
+
+func TestClientNamePrecedence(t *testing.T) {
+	// Explicit option overrides the default.
+	client := NewClient(WithAPIKey("test-key"), WithClientName("my-app"))
+	if got := client.resolveClientName(); got != "my-app" {
+		t.Errorf("expected client name my-app, got %s", got)
+	}
+
+	// Environment variable overrides the explicit option.
+	t.Setenv("WAVESPEED_CLIENT_NAME", "env-app")
+	if got := client.resolveClientName(); got != "env-app" {
+		t.Errorf("expected client name env-app, got %s", got)
+	}
+}
+
+func TestSubmitSendsAttributionHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/test-model", func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"id": "req-1"}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
+	if _, _, err := client.submit("test-model", map[string]any{"prompt": "hi"}, false, 30); err != nil {
+		t.Fatalf("submit error: %v", err)
+	}
+
+	if got := gotHeaders.Get("X-Client-Name"); got != "wavespeed-go" {
+		t.Errorf("expected X-Client-Name=wavespeed-go, got %s", got)
+	}
+	if got := gotHeaders.Get("X-Client-Version"); got != Version {
+		t.Errorf("expected X-Client-Version=%s, got %s", Version, got)
+	}
+	if got := gotHeaders.Get("X-Client-OS"); got != runtime.GOOS {
+		t.Errorf("expected X-Client-OS=%s, got %s", runtime.GOOS, got)
 	}
 }
 

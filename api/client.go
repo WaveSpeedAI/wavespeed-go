@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -29,6 +30,15 @@ func WithAPIKey(apiKey string) ClientOption {
 func WithBaseURL(baseURL string) ClientOption {
 	return func(c *Client) {
 		c.baseURL = baseURL
+	}
+}
+
+// WithClientName sets the client name reported in the X-Client-Name header
+// for channel attribution. The WAVESPEED_CLIENT_NAME environment variable
+// takes precedence over this option.
+func WithClientName(clientName string) ClientOption {
+	return func(c *Client) {
+		c.clientName = clientName
 	}
 }
 
@@ -118,6 +128,7 @@ func WithUploadTimeout(timeout float64) UploadOption {
 type Client struct {
 	apiKey               string
 	baseURL              string
+	clientName           string
 	connectionTimeout    float64
 	maxRetries           int
 	maxConnectionRetries int
@@ -128,6 +139,7 @@ type Client struct {
 type ClientOptions struct {
 	APIKey               string
 	BaseURL              string
+	ClientName           string
 	ConnectionTimeout    float64
 	MaxRetries           int
 	MaxConnectionRetries int
@@ -216,13 +228,32 @@ func NewClient(opts ...ClientOption) *Client {
 	return client
 }
 
+// defaultClientName is the X-Client-Name value used when neither the
+// WAVESPEED_CLIENT_NAME environment variable nor WithClientName is set.
+const defaultClientName = "wavespeed-go"
+
+// resolveClientName returns the value for the X-Client-Name header.
+// Precedence: WAVESPEED_CLIENT_NAME environment variable > WithClientName option > default.
+func (c *Client) resolveClientName() string {
+	if name := os.Getenv("WAVESPEED_CLIENT_NAME"); name != "" {
+		return name
+	}
+	if c.clientName != "" {
+		return c.clientName
+	}
+	return defaultClientName
+}
+
 func (c *Client) getHeaders() (map[string]string, error) {
 	if c.apiKey == "" {
 		return nil, errors.New("API key is required. Set WAVESPEED_API_KEY environment variable or pass api_key to Client()")
 	}
 	return map[string]string{
-		"Content-Type":  "application/json",
-		"Authorization": "Bearer " + c.apiKey,
+		"Content-Type":     "application/json",
+		"Authorization":    "Bearer " + c.apiKey,
+		"X-Client-Name":    c.resolveClientName(),
+		"X-Client-Version": Version,
+		"X-Client-OS":      runtime.GOOS,
 	}, nil
 }
 
@@ -807,8 +838,13 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ticketReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	ticketReq.Header.Set("Content-Type", "application/json")
+	ticketHeaders, err := c.getHeaders()
+	if err != nil {
+		return "", err
+	}
+	for k, v := range ticketHeaders {
+		ticketReq.Header.Set(k, v)
+	}
 
 	client := &http.Client{Timeout: time.Duration(requestTimeout * float64(time.Second))}
 	resp, err := client.Do(ticketReq)
