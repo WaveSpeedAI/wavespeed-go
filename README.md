@@ -166,6 +166,7 @@ go test -v -run TestRunSuccess ./api
 | Variable | Description |
 |----------|-------------|
 | `WAVESPEED_API_KEY` | WaveSpeed API key |
+| `WAVESPEED_CLIENT_NAME` | Overrides the `X-Client-Name` header used for channel attribution (takes precedence over `WithClientName`; default: `wavespeed-go`) |
 
 ## License
 

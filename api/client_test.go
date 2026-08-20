@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInitWithAPIKey(t *testing.T) {
@@ -788,5 +789,127 @@ func TestWaitMissingStatus(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "missing status") {
 		t.Errorf("expected 'missing status' error, got: %v", err)
+	}
+}
+
+func TestSubmitSingleShotOnConnectionFailure(t *testing.T) {
+	// The submission POST must fire exactly once when the connection fails:
+	// the task may already have been created server-side, so retrying could
+	// create duplicate tasks.
+	attemptCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		attemptCount++
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("server does not support hijacking")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		conn.Close() // drop the connection without responding
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithMaxConnectionRetries(5), WithRetryInterval(0.01))
+	_, _, err := client.submit("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, false, 0)
+
+	if err == nil {
+		t.Fatal("expected error for dropped connection")
+	}
+	if attemptCount != 1 {
+		t.Errorf("expected exactly 1 submission attempt, got %d", attemptCount)
+	}
+
+	var submissionErr *SubmissionError
+	if !errors.As(err, &submissionErr) {
+		t.Errorf("expected *SubmissionError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "may already have been created") {
+		t.Errorf("expected 'may already have been created' in error, got: %v", err)
+	}
+	if client.isRetryableError(err) {
+		t.Error("SubmissionError must never be retryable")
+	}
+}
+
+func TestRunCancelledStatusTerminatesWait(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":200,"data":{"id":"req-cancel"}}`))
+	})
+	resultCalls := 0
+	mux.HandleFunc("/api/v3/predictions/req-cancel/result", func(w http.ResponseWriter, r *http.Request) {
+		resultCalls++
+		w.Write([]byte(`{"code":200,"data":{"id":"req-cancel","status":"cancelled","error":"task was cancelled by user"}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01), WithTimeout(5))
+
+	if err == nil {
+		t.Fatal("expected error for cancelled task")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("expected 'cancelled' in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "task was cancelled by user") {
+		t.Errorf("expected the API's error text in error, got: %v", err)
+	}
+	if resultCalls != 1 {
+		t.Errorf("expected polling to stop after the first cancelled response, got %d calls", resultCalls)
+	}
+}
+
+func TestRunTimeoutStatusTerminatesWait(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":200,"data":{"id":"req-to"}}`))
+	})
+	mux.HandleFunc("/api/v3/predictions/req-to/result", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":200,"data":{"id":"req-to","status":"timeout","error":"task timed out"}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01), WithTimeout(5))
+
+	if err == nil {
+		t.Fatal("expected error for timed-out task")
+	}
+	if !strings.Contains(err.Error(), "task timed out") {
+		t.Errorf("expected the API's error text in error, got: %v", err)
+	}
+}
+
+func TestSyncModeNotCappedByConnectTimeout(t *testing.T) {
+	// The connect timeout must bound only the connect phase, not the whole
+	// request: a server response slower than the connect timeout must still
+	// succeed.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(900 * time.Millisecond) // much longer than the connect timeout
+		w.Write([]byte(`{"code":200,"data":{"id":"req-slow","status":"completed","outputs":["https://example.com/out.png"]}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithConnectionTimeout(0.2))
+	output, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithSyncMode(true), WithTimeout(10))
+
+	if err != nil {
+		t.Fatalf("expected success despite slow response, got: %v", err)
+	}
+	outputs, ok := output["outputs"].([]any)
+	if !ok || len(outputs) != 1 {
+		t.Fatalf("unexpected outputs: %v", output)
+	}
+	if outputs[0] != "https://example.com/out.png" {
+		t.Errorf("unexpected output: %v", outputs[0])
 	}
 }

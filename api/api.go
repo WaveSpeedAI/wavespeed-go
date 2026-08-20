@@ -12,7 +12,7 @@ func getDefaultClient() *Client {
 // Run executes a model and waits for the output.
 //
 // Args:
-//   - model: Model identifier (e.g., "wavespeed-ai/flux-dev").
+//   - model: Model identifier (e.g., "wavespeed-ai/z-image/turbo").
 //   - input: Input parameters for the model.
 //   - opts: Optional parameters (WithTimeout, WithSyncMode, etc.)
 //

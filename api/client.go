@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,25 @@ import (
 	"strings"
 	"time"
 )
+
+// SubmissionError indicates that a prediction submission POST failed without
+// a definitive response. Because the task may already have been created
+// server-side, the SDK never retries the submission POST automatically.
+// It mirrors the Python SDK's _SubmissionError.
+type SubmissionError struct {
+	Err error
+}
+
+// Error implements the error interface.
+func (e *SubmissionError) Error() string {
+	return fmt.Sprintf(
+		"prediction submission did not return a response; the task may already have been created, so the SDK will not retry the POST automatically: %v",
+		e.Err,
+	)
+}
+
+// Unwrap returns the underlying transport error.
+func (e *SubmissionError) Unwrap() error { return e.Err }
 
 // ClientOption is a function that configures a Client.
 type ClientOption func(*Client)
@@ -207,14 +227,20 @@ type uploadInstruction struct {
 //	    api.WithRetryInterval(2.0),
 //	)
 func NewClient(opts ...ClientOption) *Client {
-	// Create client with default values
+	// Create client with defaults from the global API config
 	client := &Client{
-		apiKey:               os.Getenv("WAVESPEED_API_KEY"),
-		baseURL:              "https://api.wavespeed.ai",
-		connectionTimeout:    10.0,
-		maxRetries:           0,
-		maxConnectionRetries: 5,
-		retryInterval:        1.0,
+		apiKey:               API.APIKey,
+		baseURL:              API.BaseURL,
+		connectionTimeout:    API.ConnectionTimeout,
+		maxRetries:           API.MaxRetries,
+		maxConnectionRetries: API.MaxConnectionRetries,
+		retryInterval:        API.RetryInterval,
+	}
+	if client.apiKey == "" {
+		client.apiKey = os.Getenv("WAVESPEED_API_KEY")
+	}
+	if client.baseURL == "" {
+		client.baseURL = "https://api.wavespeed.ai"
 	}
 
 	// Apply user-provided options
@@ -271,7 +297,7 @@ func (c *Client) submit(model string, input map[string]any, enableSyncMode bool,
 
 	requestTimeout := timeout
 	if requestTimeout == 0 {
-		requestTimeout = 36000.0
+		requestTimeout = defaultTimeout()
 	}
 
 	connectTimeout := c.connectionTimeout
@@ -284,82 +310,87 @@ func (c *Client) submit(model string, input map[string]any, enableSyncMode bool,
 		return "", nil, err
 	}
 
-	var lastErr error
-	for retry := 0; retry <= c.maxConnectionRetries; retry++ {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(requestTimeout*float64(time.Second)))
-		defer cancel()
+	// The submission POST is deliberately single-shot: if it fails without a
+	// definitive response, the task may already have been created server-side,
+	// so retrying could create duplicate (billed) tasks.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(requestTimeout*float64(time.Second)))
+	defer cancel()
 
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
-		if err != nil {
-			return "", nil, err
-		}
-
-		headers, err := c.getHeaders()
-		if err != nil {
-			return "", nil, err
-		}
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-
-		client := &http.Client{
-			Timeout: time.Duration(connectTimeout * float64(time.Second)),
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			if retry < c.maxConnectionRetries {
-				delay := c.retryInterval * float64(retry+1)
-				fmt.Printf("Connection error on attempt %d/%d:\n", retry+1, c.maxConnectionRetries+1)
-				fmt.Printf("%v\n", err)
-				fmt.Printf("Retrying in %.1f seconds...\n", delay)
-				time.Sleep(time.Duration(delay * float64(time.Second)))
-				continue
-			}
-			return "", nil, fmt.Errorf("failed to submit prediction after %d attempts: %w", c.maxConnectionRetries+1, lastErr)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			bodyText, _ := io.ReadAll(resp.Body)
-			return "", nil, fmt.Errorf("failed to submit prediction: HTTP %d: %s", resp.StatusCode, string(bodyText))
-		}
-
-		var result predictionResponse
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return "", nil, err
-		}
-
-		if enableSyncMode {
-			return "", map[string]any{
-				"data": map[string]any{
-					"id":         result.Data.ID,
-					"status":     result.Data.Status,
-					"error":      result.Data.Error,
-					"outputs":    result.Data.Outputs,
-					"code":       result.Data.Code,
-					"created_at": result.Data.CreatedAt,
-					"urls":       result.Data.URLs,
-				},
-			}, nil
-		}
-
-		requestID := result.Data.ID
-		if requestID == "" {
-			return "", nil, fmt.Errorf("no request ID in response: %v", result)
-		}
-
-		return requestID, nil, nil
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", nil, err
 	}
 
-	return "", nil, fmt.Errorf("failed to submit prediction after %d attempts: %w", c.maxConnectionRetries+1, lastErr)
+	headers, err := c.getHeaders()
+	if err != nil {
+		return "", nil, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := newHTTPClient(connectTimeout).Do(req)
+	if err != nil {
+		return "", nil, &SubmissionError{Err: err}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		bodyText, _ := io.ReadAll(resp.Body)
+		return "", nil, fmt.Errorf("failed to submit prediction: HTTP %d: %s", resp.StatusCode, string(bodyText))
+	}
+
+	var result predictionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", nil, err
+	}
+
+	if enableSyncMode {
+		return "", map[string]any{
+			"data": map[string]any{
+				"id":         result.Data.ID,
+				"status":     result.Data.Status,
+				"error":      result.Data.Error,
+				"outputs":    result.Data.Outputs,
+				"code":       result.Data.Code,
+				"created_at": result.Data.CreatedAt,
+				"urls":       result.Data.URLs,
+			},
+		}, nil
+	}
+
+	requestID := result.Data.ID
+	if requestID == "" {
+		return "", nil, fmt.Errorf("no request ID in response: %v", result)
+	}
+
+	return requestID, nil, nil
+}
+
+// newHTTPClient returns an HTTP client whose connect phase (dial + TLS
+// handshake) is bounded by connectTimeout, while the total request duration is
+// governed solely by the request context deadline. This mirrors the Python
+// SDK's (connect, read) timeout tuple: the connect timeout must never cap the
+// whole request.
+func newHTTPClient(connectTimeout float64) *http.Client {
+	d := time.Duration(connectTimeout * float64(time.Second))
+	if d <= 0 {
+		d = 10 * time.Second
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         (&net.Dialer{Timeout: d}).DialContext,
+			TLSHandshakeTimeout: d,
+		},
+	}
 }
 
 func (c *Client) getResult(requestID string, timeout float64) (map[string]any, error) {
 	url := c.baseURL + "/api/v3/predictions/" + requestID + "/result"
 	requestTimeout := timeout
 	if requestTimeout == 0 {
-		requestTimeout = 36000.0
+		requestTimeout = defaultTimeout()
 	}
 
 	connectTimeout := c.connectionTimeout
@@ -385,10 +416,7 @@ func (c *Client) getResult(requestID string, timeout float64) (map[string]any, e
 			req.Header.Set(k, v)
 		}
 
-		client := &http.Client{
-			Timeout: time.Duration(connectTimeout * float64(time.Second)),
-		}
-		resp, err := client.Do(req)
+		resp, err := newHTTPClient(connectTimeout).Do(req)
 		if err != nil {
 			lastErr = err
 			if retry < c.maxConnectionRetries {
@@ -453,12 +481,14 @@ func (c *Client) wait(requestID string, timeout float64, pollInterval float64) (
 			return map[string]any{"outputs": outputs}, nil
 		}
 
-		if status == "failed" {
+		// "failed", "cancelled" and "timeout" are all terminal: the task will
+		// never complete, so polling further would loop forever.
+		if status == "failed" || status == "cancelled" || status == "timeout" {
 			errorMsg := "Unknown error"
 			if e, ok := data["error"].(string); ok && e != "" {
 				errorMsg = e
 			}
-			return nil, fmt.Errorf("prediction failed (task_id: %s): %s", requestID, errorMsg)
+			return nil, fmt.Errorf("prediction %s (task_id: %s): %s", status, requestID, errorMsg)
 		}
 
 		time.Sleep(time.Duration(pollInterval * float64(time.Second)))
@@ -467,6 +497,13 @@ func (c *Client) wait(requestID string, timeout float64, pollInterval float64) (
 
 func (c *Client) isRetryableError(err error) bool {
 	if err == nil {
+		return false
+	}
+
+	// A failed submission POST must never be retried: the task may already
+	// have been created server-side.
+	var submissionErr *SubmissionError
+	if errors.As(err, &submissionErr) {
 		return false
 	}
 
@@ -537,7 +574,7 @@ func syncModeError(data map[string]any) error {
 func (c *Client) Run(model string, input map[string]any, opts ...RunOption) (map[string]any, error) {
 	// Apply default options
 	options := &RunOptions{
-		Timeout:        36000.0,
+		Timeout:        defaultTimeout(),
 		PollInterval:   1.0,
 		EnableSyncMode: false,
 		MaxRetries:     c.maxRetries,
@@ -635,7 +672,7 @@ type RunNoThrowResult struct {
 func (c *Client) RunNoThrow(model string, input map[string]any, opts ...RunOption) *RunNoThrowResult {
 	// Apply default options
 	options := &RunOptions{
-		Timeout:        36000.0,
+		Timeout:        defaultTimeout(),
 		PollInterval:   1.0,
 		EnableSyncMode: false,
 		MaxRetries:     c.maxRetries,

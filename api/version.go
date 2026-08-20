@@ -5,4 +5,4 @@ package api
 //
 // It must be kept in sync with the release tag: bump it before tagging a
 // new vX.Y.Z release.
-const Version = "0.2.3"
+const Version = "0.2.4"
