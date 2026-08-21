@@ -171,3 +171,8 @@ go test -v -run TestRunSuccess ./api
 ## License
 
 MIT
+
+---
+
+**[WaveSpeed AI](https://wavespeed.ai/)** — AI image & video generation platform.
+Try it in the browser: **[Image generator](https://wavespeed.ai/image-generator)** · **[Video generator](https://wavespeed.ai/video-generator)**
