@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -585,10 +586,10 @@ func TestUploadRealAPI(t *testing.T) {
 
 func TestRunAllRetriesFailed(t *testing.T) {
 	// Test scenario where all retries are exhausted
-	attemptCount := 0
+	var attemptCount atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
-		attemptCount++
+		attemptCount.Add(1)
 		// Return 500 error which is retryable
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"code":500,"message":"Internal Server Error"}`))
@@ -604,17 +605,17 @@ func TestRunAllRetriesFailed(t *testing.T) {
 	}
 
 	// Should have attempted 3 times (initial + 2 retries)
-	if attemptCount < 3 {
-		t.Errorf("expected at least 3 attempts, got %d", attemptCount)
+	if attemptCount.Load() < 3 {
+		t.Errorf("expected at least 3 attempts, got %d", attemptCount.Load())
 	}
 }
 
 func TestGetResultConnectionRetry(t *testing.T) {
 	// Test that getResult does NOT retry on HTTP status code errors (only on connection errors)
-	attemptCount := 0
+	var attemptCount atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/predictions/req-123/result", func(w http.ResponseWriter, r *http.Request) {
-		attemptCount++
+		attemptCount.Add(1)
 		// Return 500 - this should NOT trigger a retry
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Server Error"))
@@ -630,8 +631,8 @@ func TestGetResultConnectionRetry(t *testing.T) {
 	}
 
 	// HTTP errors should NOT retry, only connection errors do
-	if attemptCount != 1 {
-		t.Errorf("expected exactly 1 attempt (no retry for HTTP errors), got %d", attemptCount)
+	if attemptCount.Load() != 1 {
+		t.Errorf("expected exactly 1 attempt (no retry for HTTP errors), got %d", attemptCount.Load())
 	}
 
 	if !strings.Contains(err.Error(), "HTTP 500") {
@@ -671,10 +672,10 @@ func TestIsRetryableError(t *testing.T) {
 
 func TestSubmitConnectionRetry(t *testing.T) {
 	// Test that submit does NOT retry on HTTP status code errors (only on connection errors)
-	attemptCount := 0
+	var attemptCount atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
-		attemptCount++
+		attemptCount.Add(1)
 		// Return 502 - this should NOT trigger a retry
 		w.WriteHeader(http.StatusBadGateway)
 		w.Write([]byte("Bad Gateway"))
@@ -690,8 +691,8 @@ func TestSubmitConnectionRetry(t *testing.T) {
 	}
 
 	// HTTP errors should NOT retry, only connection errors do
-	if attemptCount != 1 {
-		t.Errorf("expected exactly 1 attempt (no retry for HTTP errors), got %d", attemptCount)
+	if attemptCount.Load() != 1 {
+		t.Errorf("expected exactly 1 attempt (no retry for HTTP errors), got %d", attemptCount.Load())
 	}
 
 	if !strings.Contains(err.Error(), "HTTP 502") {
@@ -796,17 +797,20 @@ func TestSubmitSingleShotOnConnectionFailure(t *testing.T) {
 	// The submission POST must fire exactly once when the connection fails:
 	// the task may already have been created server-side, so retrying could
 	// create duplicate tasks.
-	attemptCount := 0
+	var attemptCount atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
-		attemptCount++
+		attemptCount.Add(1)
 		hj, ok := w.(http.Hijacker)
 		if !ok {
-			t.Fatal("server does not support hijacking")
+			// t.FailNow must not be called outside the test goroutine.
+			t.Error("server does not support hijacking")
+			return
 		}
 		conn, _, err := hj.Hijack()
 		if err != nil {
-			t.Fatalf("hijack failed: %v", err)
+			t.Errorf("hijack failed: %v", err)
+			return
 		}
 		conn.Close() // drop the connection without responding
 	})
@@ -819,8 +823,8 @@ func TestSubmitSingleShotOnConnectionFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for dropped connection")
 	}
-	if attemptCount != 1 {
-		t.Errorf("expected exactly 1 submission attempt, got %d", attemptCount)
+	if attemptCount.Load() != 1 {
+		t.Errorf("expected exactly 1 submission attempt, got %d", attemptCount.Load())
 	}
 
 	var submissionErr *SubmissionError
