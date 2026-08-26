@@ -374,12 +374,11 @@ func TestRunSyncModeFailure(t *testing.T) {
 }
 
 func TestRunSyncModeTimeoutQueryableError(t *testing.T) {
-	resultURL := "https://api.wavespeed.ai/api/v3/predictions/req-timeout/result"
 	resultHits := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"code":200,"data":{"id":"req-timeout","status":"processing","code":5004,"error":"Sync mode timed out after 90 seconds. The prediction is still processing asynchronously.","urls":{"get":"` + resultURL + `"},"outputs":[]}}`))
+		w.Write([]byte(`{"code":200,"data":{"id":"req-timeout","status":"processing","code":5004,"error":"Sync mode timed out after 90 seconds. The prediction is still processing asynchronously.","outputs":[]}}`))
 	})
 	mux.HandleFunc("/api/v3/predictions/req-timeout/result", func(w http.ResponseWriter, r *http.Request) {
 		resultHits++
@@ -388,6 +387,7 @@ func TestRunSyncModeTimeoutQueryableError(t *testing.T) {
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
+	resultURL := server.URL + "/api/v3/predictions/req-timeout/result"
 
 	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithSyncMode(true), WithMaxRetries(1))
@@ -409,14 +409,14 @@ func TestRunSyncModeTimeoutQueryableError(t *testing.T) {
 }
 
 func TestRunNoThrowSyncModeTimeoutReturnsProcessing(t *testing.T) {
-	resultURL := "https://api.wavespeed.ai/api/v3/predictions/req-timeout/result"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"code":200,"data":{"id":"req-timeout","status":"processing","code":5004,"error":"Sync mode timed out after 90 seconds. The prediction is still processing asynchronously.","urls":{"get":"` + resultURL + `"},"outputs":[]}}`))
+		w.Write([]byte(`{"code":200,"data":{"id":"req-timeout","status":"processing","code":5004,"error":"Sync mode timed out after 90 seconds. The prediction is still processing asynchronously.","outputs":[]}}`))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
+	resultURL := server.URL + "/api/v3/predictions/req-timeout/result"
 
 	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL))
 	result := client.RunNoThrow("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithSyncMode(true))

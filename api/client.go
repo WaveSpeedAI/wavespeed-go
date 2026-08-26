@@ -481,9 +481,9 @@ func (c *Client) wait(requestID string, timeout float64, pollInterval float64) (
 			return map[string]any{"outputs": outputs}, nil
 		}
 
-		// "failed", "cancelled" and "timeout" are all terminal: the task will
+		// "failed", "cancelled", "timeout" and "deleted" are all terminal: the task will
 		// never complete, so polling further would loop forever.
-		if status == "failed" || status == "cancelled" || status == "timeout" {
+		if status == "failed" || status == "cancelled" || status == "timeout" || status == "deleted" {
 			errorMsg := "Unknown error"
 			if e, ok := data["error"].(string); ok && e != "" {
 				errorMsg = e
@@ -517,16 +517,12 @@ func (c *Client) isRetryableError(err error) bool {
 		strings.Contains(errStr, "429")
 }
 
-func syncResultURL(data map[string]any) string {
-	switch urls := data["urls"].(type) {
-	case map[string]string:
-		return urls["get"]
-	case map[string]any:
-		if resultURL, ok := urls["get"].(string); ok {
-			return resultURL
-		}
+func syncResultURL(baseURL string, data map[string]any) string {
+	requestID, ok := data["id"].(string)
+	if !ok || requestID == "" {
+		return ""
 	}
-	return ""
+	return strings.TrimRight(baseURL, "/") + "/api/v3/predictions/" + requestID + "/result"
 }
 
 func syncResultCode(data map[string]any) int {
@@ -548,7 +544,7 @@ func isSyncTimeoutData(data map[string]any) bool {
 		(status == "processing" && strings.Contains(errorMsg, "Sync mode timed out"))
 }
 
-func syncModeError(data map[string]any) error {
+func syncModeError(baseURL string, data map[string]any) error {
 	errorMsg := "Unknown error"
 	if e, ok := data["error"].(string); ok && e != "" {
 		errorMsg = e
@@ -561,7 +557,7 @@ func syncModeError(data map[string]any) error {
 
 	if isSyncTimeoutData(data) {
 		message := fmt.Sprintf("sync mode timed out (task_id: %s): %s", requestID, errorMsg)
-		if resultURL := syncResultURL(data); resultURL != "" && !strings.Contains(message, resultURL) {
+		if resultURL := syncResultURL(baseURL, data); resultURL != "" && !strings.Contains(message, resultURL) {
 			message += " Query the result later at: " + resultURL
 		}
 		return errors.New(message)
@@ -604,7 +600,7 @@ func (c *Client) Run(model string, input map[string]any, opts ...RunOption) (map
 
 				status, _ := data["status"].(string)
 				if status != "completed" {
-					return nil, syncModeError(data)
+					return nil, syncModeError(c.baseURL, data)
 				}
 
 				outputs, ok := data["outputs"]
@@ -718,11 +714,11 @@ func (c *Client) RunNoThrow(model string, input map[string]any, opts ...RunOptio
 						errorMsg = e
 					}
 					createdAt, _ := data["created_at"].(string)
-					resultURL := syncResultURL(data)
+					resultURL := syncResultURL(c.baseURL, data)
 					detailStatus := "failed"
 					if isSyncTimeoutData(data) {
 						detailStatus = "processing"
-						errorMsg = syncModeError(data).Error()
+						errorMsg = syncModeError(c.baseURL, data).Error()
 					}
 					return &RunNoThrowResult{
 						Outputs: nil,
