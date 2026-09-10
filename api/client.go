@@ -170,7 +170,6 @@ type prediction struct {
 	ID        string            `json:"id"`
 	Model     string            `json:"model"`
 	Status    string            `json:"status"`
-	Input     any               `json:"input"`
 	Outputs   []any             `json:"outputs"`
 	Error     string            `json:"error"`
 	Code      int               `json:"code"`

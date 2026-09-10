@@ -113,7 +113,7 @@ func TestSubmitSuccess(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"code":200,"message":"ok","data":{"id":"req-123","model":"wavespeed-ai/z-image/turbo","status":"processing","input":{"prompt":"test"},"outputs":[]}}`))
+		w.Write([]byte(`{"code":200,"message":"ok","data":{"id":"req-123","model":"wavespeed-ai/z-image/turbo","status":"processing","outputs":[]}}`))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
