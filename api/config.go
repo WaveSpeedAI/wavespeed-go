@@ -23,9 +23,11 @@ type APIConfig struct {
 	// value bounds the wait and each request, like WithTimeout.
 	Timeout float64
 
-	// Per-request timeout in seconds for the async submit POST and each result
-	// GET and each upload request (default 120; env WAVESPEED_READ_TIMEOUT). It
-	// never limits the overall wait for a task or the time spent sending a file.
+	// Optional override (0 = unset, the default) of the per-request read
+	// timeout in seconds; env WAVESPEED_READ_TIMEOUT. When set it replaces the
+	// per-type defaults (30s result/GET, 60s async submit, 120s upload) but not
+	// the sync-mode submit, which has no default deadline. It never limits the
+	// overall wait for a task or the time spent sending a file.
 	ReadTimeout float64
 
 	// Maximum number of retries for the entire operation (task-level retries)
@@ -46,15 +48,19 @@ var API = &APIConfig{
 	BaseURL:              "https://api.wavespeed.ai",
 	ConnectionTimeout:    10.0,
 	Timeout:              0,
-	ReadTimeout:          envFloat("WAVESPEED_READ_TIMEOUT", defaultReadTimeout),
+	ReadTimeout:          envFloat("WAVESPEED_READ_TIMEOUT", 0),
 	MaxRetries:           0,
 	MaxConnectionRetries: 5,
 	RetryInterval:        1.0,
 }
 
-// defaultReadTimeout is the per-request timeout (seconds) for async submit and
-// result requests when none is configured.
-const defaultReadTimeout = 120.0
+// Default per-request read timeouts in seconds, by request type. They bound a
+// single HTTP request, never the overall wait for a task.
+const (
+	defaultGetTimeout        = 30.0  // result queries and other read-only GETs
+	defaultSubmitTimeout     = 60.0  // async submit POST (a timeout here is ambiguous)
+	defaultUploadReadTimeout = 120.0 // upload ticket + file PUT (response wait only)
+)
 
 // envFloat parses a positive float from the environment, else returns def.
 func envFloat(name string, def float64) float64 {

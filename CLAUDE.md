@@ -64,8 +64,8 @@ Key modules in `api/`:
 
 - **Sync Mode**: Single request that waits for result
 - **Retry Logic**: Configurable task-level and connection-level retries
-- **Timeout Control**: Overall wait has no limit by default (`WithTimeout(n>0)` bounds it); async submit/result requests use a separate 120s read timeout (`WithReadTimeout`); sync-mode submit has no deadline unless `WithTimeout` is set
-- **File Upload**: Direct file upload to WaveSpeed storage (per-request read timeout 120s, not a total-transfer limit; `WithUploadTimeout` sets an explicit total deadline)
+- **Timeout Control**: Overall wait has no limit by default (`WithTimeout(n>0)` bounds it); per-request read timeouts by type: 30s result/GET, 60s async submit, 120s upload (optional override `WithReadTimeout`); sync-mode submit has no deadline unless `WithTimeout` is set
+- **File Upload**: Direct file upload to WaveSpeed storage (per-request read timeout 120s by default, not a total-transfer limit; `WithUploadTimeout` sets an explicit total deadline)
 
 ### Configuration
 
@@ -76,7 +76,7 @@ Client-level configuration via `api.NewClient`:
 - `maxRetries` - Task-level retries (default: 0)
 - `maxConnectionRetries` - HTTP connection retries (default: 5)
 - `retryInterval` - Base retry delay in seconds (default: 1.0)
-- `readTimeout` - Per-request timeout for async submit/poll in seconds (default: 120; `WAVESPEED_READ_TIMEOUT`)
+- `readTimeout` - Optional per-request override in seconds (default: unset, i.e. 30 GET / 60 submit / 120 upload; `WAVESPEED_READ_TIMEOUT`); not applied to sync submit
 
 Per-request configuration via Run parameters:
 - `timeout` - Overall wait limit in seconds (default: 0 = no limit)
@@ -87,7 +87,7 @@ Per-request configuration via Run parameters:
 ### Environment Variables
 
 - `WAVESPEED_API_KEY` - API key
-- `WAVESPEED_READ_TIMEOUT` - Default per-request timeout in seconds (120)
+- `WAVESPEED_READ_TIMEOUT` - Optional per-request read timeout override in seconds (unset by default)
 
 ## Testing
 

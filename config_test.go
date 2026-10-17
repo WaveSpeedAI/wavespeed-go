@@ -22,8 +22,8 @@ func TestAPIConfigHasExpectedAttributes(t *testing.T) {
 		t.Errorf("Expected Timeout to be 0 (no overall cap), got %f", API.Timeout)
 	}
 
-	if os.Getenv("WAVESPEED_READ_TIMEOUT") == "" && API.ReadTimeout != 120.0 {
-		t.Errorf("Expected ReadTimeout to be 120.0, got %f", API.ReadTimeout)
+	if os.Getenv("WAVESPEED_READ_TIMEOUT") == "" && API.ReadTimeout != 0 {
+		t.Errorf("Expected ReadTimeout override to be unset (0), got %f", API.ReadTimeout)
 	}
 
 	if API.MaxRetries != 0 {

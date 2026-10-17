@@ -96,11 +96,12 @@ func WithConnectionTimeout(timeout float64) ClientOption {
 	}
 }
 
-// WithReadTimeout sets the per-request timeout in seconds for the async task
-// submission POST and each result poll GET (default: 120). It bounds a single
-// HTTP request only, never the overall wait for a task; use WithTimeout for
-// that. A value <= 0 falls back to the default. It does not apply to sync
-// mode or to a request whose explicit WithTimeout is set.
+// WithReadTimeout overrides the default per-request timeout, in seconds, for
+// result/GET requests (default 30), the async submit POST (default 60) and
+// upload requests (default 120). It bounds a single HTTP request only, never
+// the overall wait for a task (use WithTimeout) nor the time spent sending a
+// file. It does not apply to the sync-mode submit, and an explicit WithTimeout
+// or WithUploadTimeout takes precedence. A value <= 0 means no override.
 func WithReadTimeout(timeout float64) ClientOption {
 	return func(c *Client) {
 		c.readTimeout = timeout
@@ -182,7 +183,7 @@ type UploadOptions struct {
 // WithUploadTimeout sets an explicit total timeout in seconds for Upload: one
 // deadline covering the upload-ticket request and the file transfer together.
 // By default (not set, or <= 0) uploads use the client's read timeout instead
-// (see WithReadTimeout, default 120s) for each request: it limits only the wait
+// (default 120s, see WithReadTimeout) for each request: it limits only the wait
 // for the server's response, never the time spent sending the file.
 func WithUploadTimeout(timeout float64) UploadOption {
 	return func(o *UploadOptions) {
@@ -255,7 +256,7 @@ type uploadInstruction struct {
 //   - apiKey: from WAVESPEED_API_KEY environment variable
 //   - baseURL: "https://api.wavespeed.ai"
 //   - connectionTimeout: 10.0 seconds
-//   - readTimeout: 120.0 seconds per async submit/poll request (WAVESPEED_READ_TIMEOUT)
+//   - per-request read timeouts: 30s result/GET, 60s async submit, 120s upload (override: WAVESPEED_READ_TIMEOUT)
 //   - maxRetries: 0 (no task-level retries)
 //   - maxConnectionRetries: 5
 //   - retryInterval: 1.0 second
@@ -341,21 +342,44 @@ var (
 	observeRequestContext func(op string, ctx context.Context)
 )
 
+// requestKind selects which default per-request read timeout applies.
+type requestKind int
+
+const (
+	kindGET        requestKind = iota // result queries and other read-only GETs
+	kindSubmit                        // async submit POST
+	kindUpload                        // upload ticket + file PUT
+	kindSyncSubmit                    // sync-mode submit POST (open until the task finishes)
+)
+
 // requestTimeoutFor returns the per-request timeout in seconds (0 = none).
-// An explicit overall timeout keeps applying to each request as before;
-// otherwise async requests use the bounded read timeout, and the sync-mode
-// submit (which stays open until the task finishes) has no deadline.
-func (c *Client) requestTimeoutFor(explicit float64, sync bool) float64 {
+// An explicit overall timeout (WithTimeout) keeps applying to each request as
+// before. Otherwise sync-mode submit has no deadline, and the other kinds use
+// the ReadTimeout override when set, else their own default.
+func (c *Client) requestTimeoutFor(explicit float64, kind requestKind) float64 {
 	if explicit > 0 {
 		return explicit
 	}
-	if sync {
+	if kind == kindSyncSubmit {
 		return 0
 	}
 	if c.readTimeout > 0 {
 		return c.readTimeout
 	}
-	return defaultReadTimeout
+	switch kind {
+	case kindSubmit:
+		return defaultSubmitTimeout
+	case kindUpload:
+		return defaultUploadReadTimeout
+	}
+	return defaultGetTimeout
+}
+
+func submitKind(sync bool) requestKind {
+	if sync {
+		return kindSyncSubmit
+	}
+	return kindSubmit
 }
 
 func newRequestContext(op string, seconds float64) (context.Context, context.CancelFunc) {
@@ -384,7 +408,7 @@ func (c *Client) submit(model string, input map[string]any, enableSyncMode bool,
 		body["enable_sync_mode"] = true
 	}
 
-	requestTimeout := c.requestTimeoutFor(timeout, enableSyncMode)
+	requestTimeout := c.requestTimeoutFor(timeout, submitKind(enableSyncMode))
 
 	connectTimeout := c.connectionTimeout
 	if requestTimeout > 0 && connectTimeout > requestTimeout {
@@ -489,7 +513,7 @@ func newUploadHTTPClient(connectTimeout, responseHeaderTimeout float64) *http.Cl
 
 func (c *Client) getResult(requestID string, timeout float64) (map[string]any, error) {
 	url := c.baseURL + "/api/v3/predictions/" + requestID + "/result"
-	requestTimeout := c.requestTimeoutFor(timeout, false)
+	requestTimeout := c.requestTimeoutFor(timeout, kindGET)
 
 	connectTimeout := c.connectionTimeout
 	if requestTimeout > 0 && connectTimeout > requestTimeout {
@@ -1002,7 +1026,7 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 		client = &http.Client{Timeout: time.Duration(requestTimeout * float64(time.Second))}
 		putClient = client
 	} else {
-		read := c.requestTimeoutFor(0, false)
+		read := c.requestTimeoutFor(0, kindUpload)
 		ctx, cancel = context.WithCancel(context.Background())
 		client = newUploadHTTPClient(c.connectionTimeout, read)
 		putClient = client

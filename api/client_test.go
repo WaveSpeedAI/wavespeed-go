@@ -1164,15 +1164,15 @@ func TestRequestDeadlines(t *testing.T) {
 		return o.has && o.deadline > want-5*time.Second && o.deadline <= want
 	}
 
-	// Async default: both requests bounded by 120s, not by the overall cap.
+	// Async default: submit 60s, result GET 30s, not the overall cap.
 	seen := run(nil)
 	if len(seen) != 2 || seen[0].op != "submit" || seen[1].op != "result" ||
-		!near(seen[0], 120*time.Second) || !near(seen[1], 120*time.Second) {
-		t.Errorf("async default: want submit+result deadlines ~120s, got %+v", seen)
+		!near(seen[0], 60*time.Second) || !near(seen[1], 30*time.Second) {
+		t.Errorf("async default: want submit ~60s and result ~30s, got %+v", seen)
 	}
 	// Client read timeout option.
-	seen = run([]ClientOption{WithReadTimeout(30)})
-	if len(seen) != 2 || !near(seen[0], 30*time.Second) || !near(seen[1], 30*time.Second) {
+	seen = run([]ClientOption{WithReadTimeout(45)})
+	if len(seen) != 2 || !near(seen[0], 45*time.Second) || !near(seen[1], 45*time.Second) {
 		t.Errorf("read timeout option: got %+v", seen)
 	}
 	// Explicit timeout keeps today's per-request behaviour.
@@ -1185,6 +1185,11 @@ func TestRequestDeadlines(t *testing.T) {
 	if len(seen) != 1 || seen[0].op != "submit" || seen[0].has {
 		t.Errorf("sync default: want one submit without deadline, got %+v", seen)
 	}
+	// Read-timeout override does not apply to the sync submit.
+	seen = run([]ClientOption{WithReadTimeout(45)}, WithSyncMode(true))
+	if len(seen) != 1 || seen[0].has {
+		t.Errorf("sync with override: want no deadline, got %+v", seen)
+	}
 	// Sync explicit: explicit deadline.
 	seen = run(nil, WithSyncMode(true), WithTimeout(500))
 	if len(seen) != 1 || !near(seen[0], 500*time.Second) {
@@ -1193,18 +1198,18 @@ func TestRequestDeadlines(t *testing.T) {
 }
 
 func TestReadTimeoutEnvDefault(t *testing.T) {
-	if got := envFloat("WAVESPEED_TEST_UNSET_X", 120); got != 120 {
+	if got := envFloat("WAVESPEED_TEST_UNSET_X", 0); got != 0 {
 		t.Errorf("unset env: got %v", got)
 	}
 	t.Setenv("WAVESPEED_TEST_X", "45.5")
-	if got := envFloat("WAVESPEED_TEST_X", 120); got != 45.5 {
+	if got := envFloat("WAVESPEED_TEST_X", 0); got != 45.5 {
 		t.Errorf("env value: got %v", got)
 	}
 	t.Setenv("WAVESPEED_TEST_X", "junk")
-	if got := envFloat("WAVESPEED_TEST_X", 120); got != 120 {
+	if got := envFloat("WAVESPEED_TEST_X", 0); got != 0 {
 		t.Errorf("bad env: got %v", got)
 	}
-	if API.ReadTimeout != 120 && os.Getenv("WAVESPEED_READ_TIMEOUT") == "" {
+	if API.ReadTimeout != 0 && os.Getenv("WAVESPEED_READ_TIMEOUT") == "" {
 		t.Errorf("default ReadTimeout = %v", API.ReadTimeout)
 	}
 }
@@ -1316,5 +1321,38 @@ func TestUploadReadTimeoutNotATotalTransferDeadline(t *testing.T) {
 	t0 := time.Now()
 	if _, err := client.Upload(tempUploadFile(t, 10)); err == nil || time.Since(t0) > 1500*time.Millisecond {
 		t.Errorf("expected read timeout failure quickly, err=%v after %v", err, time.Since(t0))
+	}
+}
+
+func TestRequestKindDefaultsAndOverride(t *testing.T) {
+	c := NewClient(WithAPIKey("k"))
+	for _, tc := range []struct {
+		name     string
+		explicit float64
+		kind     requestKind
+		want     float64
+	}{
+		{"get", 0, kindGET, 30},
+		{"submit", 0, kindSubmit, 60},
+		{"upload", 0, kindUpload, 120},
+		{"sync submit", 0, kindSyncSubmit, 0},
+		{"explicit get", 500, kindGET, 500},
+		{"explicit sync", 500, kindSyncSubmit, 500},
+	} {
+		if got := c.requestTimeoutFor(tc.explicit, tc.kind); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+	o := NewClient(WithAPIKey("k"), WithReadTimeout(45))
+	for _, k := range []requestKind{kindGET, kindSubmit, kindUpload} {
+		if got := o.requestTimeoutFor(0, k); got != 45 {
+			t.Errorf("override kind %d: got %v", k, got)
+		}
+	}
+	if got := o.requestTimeoutFor(0, kindSyncSubmit); got != 0 {
+		t.Errorf("override must not apply to sync submit, got %v", got)
+	}
+	if got := o.requestTimeoutFor(500, kindGET); got != 500 {
+		t.Errorf("explicit must beat override, got %v", got)
 	}
 }

@@ -87,9 +87,10 @@ By default `Run` waits for the task to reach a terminal status with no overall
 time limit, so long-running tasks (many hours) are fine. Pass
 `WithTimeout(seconds)` with a positive value to bound the total wait; `0` or a
 negative value means no limit. Each submit/poll request is separately bounded by
-the read timeout (default 120 seconds, `WithReadTimeout` or the
-`WAVESPEED_READ_TIMEOUT` environment variable), so one hung request fails alone
-and result polling retries it. In sync mode the submit request stays open until
+a read timeout by request type (30 seconds for result queries, 60 for the async
+submit, 120 for uploads), so one hung request fails alone and result polling
+retries it. `WithReadTimeout` or the `WAVESPEED_READ_TIMEOUT` environment
+variable replaces these defaults with one value for all three. In sync mode the submit request stays open until
 the task finishes, so it has no deadline unless you set `WithTimeout`. An
 explicit `WithTimeout` also keeps applying to each individual request, as before.
 
@@ -132,14 +133,15 @@ client := api.NewClient(
     api.WithClientMaxRetries(0),       // Task re-runs after a reported failure; each is a new paid task (default: 0)
     api.WithMaxConnectionRetries(5),   // Result-query GET retries; the submission POST is never retried (default: 5)
     api.WithRetryInterval(1.0),        // Base delay between retries in seconds (default: 1.0)
-    api.WithReadTimeout(120),          // Per-request timeout for submit/poll requests, not the overall wait (default: 120)
+    api.WithReadTimeout(45),           // Optional per-request override (defaults: 30 result, 60 submit, 120 upload); not the overall wait
 )
 ```
 
 ### Upload Files
 
 Upload images, videos, or audio files. Uploads use the same read timeout as
-other requests (default 120 seconds, `WithReadTimeout`): it limits only how long
+other requests (default 120 seconds for uploads, or the `WithReadTimeout`
+override): it limits only how long
 the SDK waits for the server to respond, not how long a large file takes to
 send. `WithUploadTimeout(seconds)` instead sets one explicit total deadline for
 the whole upload.

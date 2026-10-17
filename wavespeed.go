@@ -43,8 +43,9 @@ var (
 	WithClientName = api.WithClientName
 	// WithConnectionTimeout sets the connection timeout in seconds.
 	WithConnectionTimeout = api.WithConnectionTimeout
-	// WithReadTimeout sets the per-request timeout in seconds for async submit and
-	// result requests (default: 120); it never limits the overall wait.
+	// WithReadTimeout overrides the per-request timeout in seconds (defaults: 30
+	// result/GET, 60 async submit, 120 upload; not sync submit); it never limits
+	// the overall wait.
 	WithReadTimeout = api.WithReadTimeout
 	// WithClientMaxRetries sets the maximum number of task-level retries.
 	WithClientMaxRetries = api.WithClientMaxRetries
