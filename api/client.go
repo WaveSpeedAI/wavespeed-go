@@ -554,12 +554,14 @@ func (c *Client) isRetryableError(err error) bool {
 		return false
 	}
 
-	// Re-run only when the task itself reported failure. Poll-side HTTP
+	// Re-run only when the task itself reported a transient upstream failure
+	// (HTTP 5xx / 429 in its error text, as before); a deterministic failure
+	// such as a content-policy rejection would fail again. Poll-side HTTP
 	// errors, poll timeouts and client wait timeouts leave a task that already
 	// exists (and may be billed), so they must not lead to another POST.
 	var failed *taskFailedError
 	if errors.As(err, &failed) {
-		return true
+		return strings.Contains(failed.msg, "HTTP 5") || strings.Contains(failed.msg, "HTTP 429")
 	}
 
 	// A 429 on submit is a definitive rejection: no task was created.

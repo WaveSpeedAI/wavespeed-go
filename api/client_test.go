@@ -594,7 +594,7 @@ func TestRunAllRetriesFailed(t *testing.T) {
 		w.Write([]byte(`{"data":{"id":"req-fail"}}`))
 	})
 	mux.HandleFunc("/api/v3/predictions/req-fail/result", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"status":"failed","error":"boom"}}`))
+		w.Write([]byte(`{"data":{"status":"failed","error":"HTTP 500 boom"}}`))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -792,8 +792,10 @@ func TestIsRetryableError(t *testing.T) {
 		expected bool
 	}{
 		{"nil error", nil, false},
-		{"failed task", &taskFailedError{msg: "prediction failed (task_id: x): boom"}, true},
-		{"failed task wrapped", fmt.Errorf("wrap: %w", &taskFailedError{msg: "x"}), true},
+		{"failed task transient", &taskFailedError{msg: "prediction failed (task_id: x): HTTP 500 upstream"}, true},
+		{"failed task rate limited", &taskFailedError{msg: "prediction failed (task_id: x): HTTP 429"}, true},
+		{"failed task wrapped", fmt.Errorf("wrap: %w", &taskFailedError{msg: "prediction failed: HTTP 503"}), true},
+		{"failed task deterministic", &taskFailedError{msg: "prediction failed (task_id: x): content policy violation"}, false},
 		{"submit 429", &submitHTTPError{StatusCode: 429, msg: "HTTP 429"}, true},
 		{"submit 500", &submitHTTPError{StatusCode: 500, msg: "HTTP 500"}, false},
 		{"submit 502", &submitHTTPError{StatusCode: 502, msg: "HTTP 502"}, false},
