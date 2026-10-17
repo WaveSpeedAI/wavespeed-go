@@ -36,6 +36,33 @@ func (e *SubmissionError) Error() string {
 // Unwrap returns the underlying transport error.
 func (e *SubmissionError) Unwrap() error { return e.Err }
 
+// taskFailedError means the task itself reported status "failed". It is the
+// only error (besides a rate-limited submit) that Run may answer with a task
+// re-run, because the failed task is already finished.
+type taskFailedError struct {
+	msg string
+}
+
+func (e *taskFailedError) Error() string { return e.msg }
+
+// submitHTTPError is a non-200 response to the submission POST.
+type submitHTTPError struct {
+	StatusCode int
+	msg        string
+}
+
+func (e *submitHTTPError) Error() string { return e.msg }
+
+// isRetryableStatus lists the HTTP statuses that are safe to retry on the
+// result-polling GET. It matches the Python SDK's _RETRYABLE_STATUS_CODES.
+func isRetryableStatus(code int) bool {
+	switch code {
+	case 429, 500, 502, 503, 504:
+		return true
+	}
+	return false
+}
+
 // ClientOption is a function that configures a Client.
 type ClientOption func(*Client)
 
@@ -336,7 +363,10 @@ func (c *Client) submit(model string, input map[string]any, enableSyncMode bool,
 
 	if resp.StatusCode != 200 {
 		bodyText, _ := io.ReadAll(resp.Body)
-		return "", nil, fmt.Errorf("failed to submit prediction: HTTP %d: %s", resp.StatusCode, string(bodyText))
+		return "", nil, &submitHTTPError{
+			StatusCode: resp.StatusCode,
+			msg:        fmt.Sprintf("failed to submit prediction: HTTP %d: %s", resp.StatusCode, string(bodyText)),
+		}
 	}
 
 	var result predictionResponse
@@ -432,7 +462,21 @@ func (c *Client) getResult(requestID string, timeout float64) (map[string]any, e
 
 		if resp.StatusCode != 200 {
 			bodyText, _ := io.ReadAll(resp.Body)
-			return nil, fmt.Errorf("failed to get result for task %s: HTTP %d: %s", requestID, resp.StatusCode, string(bodyText))
+			statusErr := fmt.Errorf("failed to get result for task %s: HTTP %d: %s", requestID, resp.StatusCode, string(bodyText))
+			// Polling is a read-only GET, so transient gateway/rate-limit
+			// responses are retried like connection errors.
+			if !isRetryableStatus(resp.StatusCode) {
+				return nil, statusErr
+			}
+			lastErr = statusErr
+			if retry < c.maxConnectionRetries {
+				delay := c.retryInterval * float64(retry+1)
+				fmt.Printf("HTTP %d getting result on attempt %d/%d:\n", resp.StatusCode, retry+1, c.maxConnectionRetries+1)
+				fmt.Printf("Retrying in %.1f seconds...\n", delay)
+				time.Sleep(time.Duration(delay * float64(time.Second)))
+				continue
+			}
+			return nil, fmt.Errorf("failed to get result for task %s after %d attempts: %w", requestID, c.maxConnectionRetries+1, lastErr)
 		}
 
 		var result map[string]any
@@ -487,7 +531,11 @@ func (c *Client) wait(requestID string, timeout float64, pollInterval float64) (
 			if e, ok := data["error"].(string); ok && e != "" {
 				errorMsg = e
 			}
-			return nil, fmt.Errorf("prediction %s (task_id: %s): %s", status, requestID, errorMsg)
+			err := fmt.Errorf("prediction %s (task_id: %s): %s", status, requestID, errorMsg)
+			if status == "failed" {
+				return nil, &taskFailedError{msg: err.Error()}
+			}
+			return nil, err
 		}
 
 		time.Sleep(time.Duration(pollInterval * float64(time.Second)))
@@ -506,14 +554,17 @@ func (c *Client) isRetryableError(err error) bool {
 		return false
 	}
 
-	errStr := strings.ToLower(err.Error())
-	if strings.Contains(errStr, "sync mode timed out") {
-		return false
+	// Re-run only when the task itself reported failure. Poll-side HTTP
+	// errors, poll timeouts and client wait timeouts leave a task that already
+	// exists (and may be billed), so they must not lead to another POST.
+	var failed *taskFailedError
+	if errors.As(err, &failed) {
+		return true
 	}
-	return strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "connection") ||
-		strings.Contains(errStr, "http 5") ||
-		strings.Contains(errStr, "429")
+
+	// A 429 on submit is a definitive rejection: no task was created.
+	var httpErr *submitHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == 429
 }
 
 func syncResultURL(baseURL string, data map[string]any) string {
@@ -562,7 +613,11 @@ func syncModeError(baseURL string, data map[string]any) error {
 		return errors.New(message)
 	}
 
-	return fmt.Errorf("prediction failed (task_id: %s): %s", requestID, errorMsg)
+	err := fmt.Errorf("prediction failed (task_id: %s): %s", requestID, errorMsg)
+	if status, _ := data["status"].(string); status == "failed" {
+		return &taskFailedError{msg: err.Error()}
+	}
+	return err
 }
 
 // Run executes a model and waits for the output.
@@ -598,18 +653,21 @@ func (c *Client) Run(model string, input map[string]any, opts ...RunOption) (map
 				}
 
 				status, _ := data["status"].(string)
-				if status != "completed" {
-					return nil, syncModeError(c.baseURL, data)
+				if status == "completed" {
+					outputs, ok := data["outputs"]
+					if !ok {
+						outputs = []any{}
+					}
+					return map[string]any{"outputs": outputs}, nil
 				}
-
-				outputs, ok := data["outputs"]
-				if !ok {
-					outputs = []any{}
+				err = syncModeError(c.baseURL, data)
+			} else {
+				var result map[string]any
+				result, err = c.wait(requestID, timeout, pollInterval)
+				if err == nil {
+					return result, nil
 				}
-				return map[string]any{"outputs": outputs}, nil
 			}
-
-			return c.wait(requestID, timeout, pollInterval)
 		}
 
 		lastError = err

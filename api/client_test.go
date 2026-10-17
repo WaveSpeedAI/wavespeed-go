@@ -585,58 +585,201 @@ func TestUploadRealAPI(t *testing.T) {
 // Additional tests for coverage improvement
 
 func TestRunAllRetriesFailed(t *testing.T) {
-	// Test scenario where all retries are exhausted
-	var attemptCount atomic.Int64
+	// Test scenario where a task keeps failing: the task is re-run until the
+	// retry budget is exhausted.
+	var submitCount atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
-		attemptCount.Add(1)
-		// Return 500 error which is retryable
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"code":500,"message":"Internal Server Error"}`))
+		submitCount.Add(1)
+		w.Write([]byte(`{"data":{"id":"req-fail"}}`))
+	})
+	mux.HandleFunc("/api/v3/predictions/req-fail/result", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":{"status":"failed","error":"boom"}}`))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithClientMaxRetries(2), WithRetryInterval(0.01)) // maxRetries=2
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithClientMaxRetries(2), WithRetryInterval(0.01))
 	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01), WithMaxRetries(2))
 
 	if err == nil {
 		t.Fatal("expected error after all retries failed")
 	}
 
-	// Should have attempted 3 times (initial + 2 retries)
-	if attemptCount.Load() < 3 {
-		t.Errorf("expected at least 3 attempts, got %d", attemptCount.Load())
+	// initial + 2 task-level re-runs
+	if submitCount.Load() != 3 {
+		t.Errorf("expected 3 submits, got %d", submitCount.Load())
 	}
 }
 
-func TestGetResultConnectionRetry(t *testing.T) {
-	// Test that getResult does NOT retry on HTTP status code errors (only on connection errors)
+func TestRunSubmit5xxIsNotRetried(t *testing.T) {
+	// A 5xx on submit is ambiguous (the task may exist), so Run must not re-POST.
+	var submitCount atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		submitCount.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithRetryInterval(0.01))
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithMaxRetries(3))
+	if err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+	if submitCount.Load() != 1 {
+		t.Errorf("expected exactly 1 submit, got %d", submitCount.Load())
+	}
+}
+
+func TestRunDoesNotResubmitAfterPollFailure(t *testing.T) {
+	var submitCount atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		submitCount.Add(1)
+		w.Write([]byte(`{"data":{"id":"req-poll"}}`))
+	})
+	mux.HandleFunc("/api/v3/predictions/req-poll/result", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithMaxConnectionRetries(1), WithRetryInterval(0.01))
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01), WithMaxRetries(3))
+	if err == nil {
+		t.Fatal("expected error for persistent poll 502")
+	}
+	if submitCount.Load() != 1 {
+		t.Errorf("expected exactly 1 submit after poll failure, got %d", submitCount.Load())
+	}
+	if !strings.Contains(err.Error(), "req-poll") {
+		t.Errorf("expected task id in error, got: %v", err)
+	}
+}
+
+func TestRunDoesNotResubmitAfterWaitTimeout(t *testing.T) {
+	var submitCount atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		submitCount.Add(1)
+		w.Write([]byte(`{"data":{"id":"req-slow"}}`))
+	})
+	mux.HandleFunc("/api/v3/predictions/req-slow/result", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":{"status":"processing"}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithRetryInterval(0.01))
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithTimeout(0.2), WithPollInterval(0.05), WithMaxRetries(3))
+	if err == nil {
+		t.Fatal("expected wait timeout error")
+	}
+	if submitCount.Load() != 1 {
+		t.Errorf("expected exactly 1 submit after wait timeout, got %d", submitCount.Load())
+	}
+}
+
+func TestRunDoesNotRerunOnFailedTaskMentioningTimeout(t *testing.T) {
+	// Error text that merely contains "timeout"/"HTTP 5" must not look retryable
+	// unless it is a failed task; a cancelled task is not re-run either.
+	var submitCount atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/wavespeed-ai/z-image/turbo", func(w http.ResponseWriter, r *http.Request) {
+		submitCount.Add(1)
+		w.Write([]byte(`{"data":{"id":"req-c"}}`))
+	})
+	mux.HandleFunc("/api/v3/predictions/req-c/result", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":{"status":"cancelled","error":"upstream timeout HTTP 503"}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithRetryInterval(0.01))
+	_, err := client.Run("wavespeed-ai/z-image/turbo", map[string]any{"prompt": "test"}, WithPollInterval(0.01), WithMaxRetries(3))
+	if err == nil {
+		t.Fatal("expected error for cancelled task")
+	}
+	if submitCount.Load() != 1 {
+		t.Errorf("expected exactly 1 submit, got %d", submitCount.Load())
+	}
+}
+
+func TestGetResultRetriesTransientStatus(t *testing.T) {
 	var attemptCount atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/predictions/req-123/result", func(w http.ResponseWriter, r *http.Request) {
-		attemptCount.Add(1)
-		// Return 500 - this should NOT trigger a retry
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("Server Error"))
+		if attemptCount.Add(1) <= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte("Bad Gateway"))
+			return
+		}
+		w.Write([]byte(`{"data":{"status":"completed","outputs":["ok"]}}`))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
 	client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithMaxConnectionRetries(5), WithRetryInterval(0.01))
-	_, err := client.getResult("req-123", 0)
-
-	if err == nil {
-		t.Fatal("expected error for HTTP 500")
+	result, err := client.wait("req-123", 0, 0.01)
+	if err != nil {
+		t.Fatalf("expected success after transient 502s, got: %v", err)
 	}
-
-	// HTTP errors should NOT retry, only connection errors do
-	if attemptCount.Load() != 1 {
-		t.Errorf("expected exactly 1 attempt (no retry for HTTP errors), got %d", attemptCount.Load())
+	if result["outputs"] == nil {
+		t.Errorf("expected outputs, got %v", result)
 	}
+	if attemptCount.Load() != 3 {
+		t.Errorf("expected 3 attempts, got %d", attemptCount.Load())
+	}
+}
 
-	if !strings.Contains(err.Error(), "HTTP 500") {
-		t.Errorf("expected 'HTTP 500' in error, got: %v", err)
+func TestGetResultTransientStatusExhausted(t *testing.T) {
+	for _, code := range []int{429, 500, 502, 503, 504} {
+		var attemptCount atomic.Int64
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/v3/predictions/req-123/result", func(w http.ResponseWriter, r *http.Request) {
+			attemptCount.Add(1)
+			w.WriteHeader(code)
+		})
+		server := httptest.NewServer(mux)
+
+		client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithMaxConnectionRetries(2), WithRetryInterval(0.01))
+		_, err := client.getResult("req-123", 0)
+		server.Close()
+
+		if err == nil {
+			t.Fatalf("HTTP %d: expected error", code)
+		}
+		if attemptCount.Load() != 3 {
+			t.Errorf("HTTP %d: expected 3 attempts, got %d", code, attemptCount.Load())
+		}
+		if !strings.Contains(err.Error(), "req-123") || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", code)) {
+			t.Errorf("HTTP %d: expected task id and status in error, got: %v", code, err)
+		}
+	}
+}
+
+func TestGetResultNonTransientStatusNotRetried(t *testing.T) {
+	for _, code := range []int{400, 401, 403, 404} {
+		var attemptCount atomic.Int64
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/v3/predictions/req-123/result", func(w http.ResponseWriter, r *http.Request) {
+			attemptCount.Add(1)
+			w.WriteHeader(code)
+		})
+		server := httptest.NewServer(mux)
+
+		client := NewClient(WithAPIKey("test-key"), WithBaseURL(server.URL), WithMaxConnectionRetries(5), WithRetryInterval(0.01))
+		_, err := client.getResult("req-123", 0)
+		server.Close()
+
+		if err == nil {
+			t.Fatalf("HTTP %d: expected error", code)
+		}
+		if attemptCount.Load() != 1 {
+			t.Errorf("HTTP %d: expected exactly 1 attempt, got %d", code, attemptCount.Load())
+		}
 	}
 }
 
@@ -649,14 +792,16 @@ func TestIsRetryableError(t *testing.T) {
 		expected bool
 	}{
 		{"nil error", nil, false},
-		{"timeout error", errors.New("connection timeout"), true},
-		{"connection error", errors.New("connection refused"), true},
-		{"http 500 error", errors.New("HTTP 500 Internal Server Error"), true},
-		{"http 502 error", errors.New("HTTP 502 Bad Gateway"), true},
-		{"http 503 error", errors.New("HTTP 503 Service Unavailable"), true},
-		{"429 rate limit", errors.New("HTTP 429 Too Many Requests"), true},
-		{"non-retryable 404", errors.New("HTTP 404 Not Found"), false},
-		{"non-retryable 400", errors.New("HTTP 400 Bad Request"), false},
+		{"failed task", &taskFailedError{msg: "prediction failed (task_id: x): boom"}, true},
+		{"failed task wrapped", fmt.Errorf("wrap: %w", &taskFailedError{msg: "x"}), true},
+		{"submit 429", &submitHTTPError{StatusCode: 429, msg: "HTTP 429"}, true},
+		{"submit 500", &submitHTTPError{StatusCode: 500, msg: "HTTP 500"}, false},
+		{"submit 502", &submitHTTPError{StatusCode: 502, msg: "HTTP 502"}, false},
+		{"submit 400", &submitHTTPError{StatusCode: 400, msg: "HTTP 400"}, false},
+		{"submission transport error", &SubmissionError{Err: errors.New("connection reset")}, false},
+		{"poll http 502 text", errors.New("failed to get result for task t: HTTP 502: x"), false},
+		{"timeout text", errors.New("prediction timed out after 5 seconds (task_id: t)"), false},
+		{"cancelled task mentioning timeout", errors.New("prediction cancelled (task_id: t): upstream timeout HTTP 503"), false},
 		{"generic error", errors.New("some random error"), false},
 	}
 
