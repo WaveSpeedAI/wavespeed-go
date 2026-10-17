@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1062,5 +1064,147 @@ func TestSyncModeNotCappedByConnectTimeout(t *testing.T) {
 	}
 	if outputs[0] != "https://example.com/out.png" {
 		t.Errorf("unexpected output: %v", outputs[0])
+	}
+}
+
+// fakeClock replaces the wait loop's clock/sleep so a "10+ hour" task can be
+// simulated instantly. Each sleep advances the clock by step.
+func useFakeClock(t *testing.T, step time.Duration) *int64 {
+	t.Helper()
+	var offset int64
+	base := time.Now()
+	oldNow, oldSleep := nowFunc, sleepFunc
+	nowFunc = func() time.Time { return base.Add(time.Duration(atomic.LoadInt64(&offset))) }
+	sleepFunc = func(time.Duration) { atomic.AddInt64(&offset, int64(step)) }
+	t.Cleanup(func() { nowFunc, sleepFunc = oldNow, oldSleep })
+	return &offset
+}
+
+func processingServer(t *testing.T, processingPolls int32) (*httptest.Server, *int32, *int32) {
+	var posts, polls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/m", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&posts, 1)
+		w.Write([]byte(`{"code":200,"data":{"id":"req-1"}}`))
+	})
+	mux.HandleFunc("/api/v3/predictions/req-1/result", func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&polls, 1) <= processingPolls {
+			w.Write([]byte(`{"code":200,"data":{"status":"processing"}}`))
+			return
+		}
+		w.Write([]byte(`{"code":200,"data":{"status":"completed","outputs":["u"]}}`))
+	})
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s, &posts, &polls
+}
+
+func TestRunDefaultHasNoOverallCap(t *testing.T) {
+	// 12 simulated hours of "processing" (> the old 36000s cap), 1h per poll.
+	useFakeClock(t, time.Hour)
+	server, posts, _ := processingServer(t, 12)
+	client := NewClient(WithAPIKey("k"), WithBaseURL(server.URL))
+	out, err := client.Run("m", nil)
+	if err != nil {
+		t.Fatalf("default Run must wait past 36000s, got: %v", err)
+	}
+	if outs, _ := out["outputs"].([]any); len(outs) != 1 {
+		t.Fatalf("unexpected outputs: %v", out)
+	}
+	if atomic.LoadInt32(posts) != 1 {
+		t.Errorf("expected single POST, got %d", *posts)
+	}
+}
+
+func TestRunExplicitTimeoutStillBoundsWait(t *testing.T) {
+	useFakeClock(t, time.Hour)
+	server, posts, _ := processingServer(t, 1000)
+	client := NewClient(WithAPIKey("k"), WithBaseURL(server.URL))
+	_, err := client.Run("m", nil, WithTimeout(36000))
+	if err == nil || !strings.Contains(err.Error(), "prediction timed out after 36000 seconds") {
+		t.Fatalf("expected timeout error, got: %v", err)
+	}
+	if atomic.LoadInt32(posts) != 1 {
+		t.Errorf("Run must not re-POST after timeout, got %d", *posts)
+	}
+}
+
+func TestRequestDeadlines(t *testing.T) {
+	type obs struct {
+		op       string
+		deadline time.Duration
+		has      bool
+	}
+	run := func(opts []ClientOption, runOpts ...RunOption) []obs {
+		var mu sync.Mutex
+		var seen []obs
+		observeRequestContext = func(op string, ctx context.Context) {
+			d, ok := ctx.Deadline()
+			mu.Lock()
+			seen = append(seen, obs{op, time.Until(d), ok})
+			mu.Unlock()
+		}
+		defer func() { observeRequestContext = nil }()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/v3/m", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"code":200,"data":{"id":"req-1","status":"completed","outputs":["u"]}}`))
+		})
+		mux.HandleFunc("/api/v3/predictions/req-1/result", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"code":200,"data":{"status":"completed","outputs":["u"]}}`))
+		})
+		s := httptest.NewServer(mux)
+		defer s.Close()
+		client := NewClient(append([]ClientOption{WithAPIKey("k"), WithBaseURL(s.URL)}, opts...)...)
+		if _, err := client.Run("m", nil, runOpts...); err != nil {
+			t.Fatal(err)
+		}
+		return seen
+	}
+	near := func(o obs, want time.Duration) bool {
+		return o.has && o.deadline > want-5*time.Second && o.deadline <= want
+	}
+
+	// Async default: both requests bounded by 120s, not by the overall cap.
+	seen := run(nil)
+	if len(seen) != 2 || seen[0].op != "submit" || seen[1].op != "result" ||
+		!near(seen[0], 120*time.Second) || !near(seen[1], 120*time.Second) {
+		t.Errorf("async default: want submit+result deadlines ~120s, got %+v", seen)
+	}
+	// Client read timeout option.
+	seen = run([]ClientOption{WithReadTimeout(30)})
+	if len(seen) != 2 || !near(seen[0], 30*time.Second) || !near(seen[1], 30*time.Second) {
+		t.Errorf("read timeout option: got %+v", seen)
+	}
+	// Explicit timeout keeps today's per-request behaviour.
+	seen = run(nil, WithTimeout(500))
+	if len(seen) != 2 || !near(seen[0], 500*time.Second) || !near(seen[1], 500*time.Second) {
+		t.Errorf("explicit timeout: got %+v", seen)
+	}
+	// Sync default: no deadline on the submit POST.
+	seen = run(nil, WithSyncMode(true))
+	if len(seen) != 1 || seen[0].op != "submit" || seen[0].has {
+		t.Errorf("sync default: want one submit without deadline, got %+v", seen)
+	}
+	// Sync explicit: explicit deadline.
+	seen = run(nil, WithSyncMode(true), WithTimeout(500))
+	if len(seen) != 1 || !near(seen[0], 500*time.Second) {
+		t.Errorf("sync explicit: got %+v", seen)
+	}
+}
+
+func TestReadTimeoutEnvDefault(t *testing.T) {
+	if got := envFloat("WAVESPEED_TEST_UNSET_X", 120); got != 120 {
+		t.Errorf("unset env: got %v", got)
+	}
+	t.Setenv("WAVESPEED_TEST_X", "45.5")
+	if got := envFloat("WAVESPEED_TEST_X", 120); got != 45.5 {
+		t.Errorf("env value: got %v", got)
+	}
+	t.Setenv("WAVESPEED_TEST_X", "junk")
+	if got := envFloat("WAVESPEED_TEST_X", 120); got != 120 {
+		t.Errorf("bad env: got %v", got)
+	}
+	if API.ReadTimeout != 120 && os.Getenv("WAVESPEED_READ_TIMEOUT") == "" {
+		t.Errorf("default ReadTimeout = %v", API.ReadTimeout)
 	}
 }

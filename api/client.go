@@ -96,6 +96,17 @@ func WithConnectionTimeout(timeout float64) ClientOption {
 	}
 }
 
+// WithReadTimeout sets the per-request timeout in seconds for the async task
+// submission POST and each result poll GET (default: 120). It bounds a single
+// HTTP request only, never the overall wait for a task; use WithTimeout for
+// that. A value <= 0 falls back to the default. It does not apply to sync
+// mode or to a request whose explicit WithTimeout is set.
+func WithReadTimeout(timeout float64) ClientOption {
+	return func(c *Client) {
+		c.readTimeout = timeout
+	}
+}
+
 // WithClientMaxRetries sets the maximum number of task-level retries.
 func WithClientMaxRetries(maxRetries int) ClientOption {
 	return func(c *Client) {
@@ -128,7 +139,11 @@ type RunOptions struct {
 	MaxRetries     int
 }
 
-// WithTimeout sets the maximum time to wait for completion.
+// WithTimeout sets the maximum time in seconds to wait for completion.
+//
+// By default there is no overall time limit: Run waits until the task reaches
+// a terminal status. A positive value bounds the overall wait (and, as before,
+// each request made during Run); 0 or a negative value means no limit.
 func WithTimeout(timeout float64) RunOption {
 	return func(o *RunOptions) {
 		o.Timeout = timeout
@@ -177,6 +192,7 @@ type Client struct {
 	baseURL              string
 	clientName           string
 	connectionTimeout    float64
+	readTimeout          float64
 	maxRetries           int
 	maxConnectionRetries int
 	retryInterval        float64
@@ -188,6 +204,7 @@ type ClientOptions struct {
 	BaseURL              string
 	ClientName           string
 	ConnectionTimeout    float64
+	ReadTimeout          float64
 	MaxRetries           int
 	MaxConnectionRetries int
 	RetryInterval        float64
@@ -234,6 +251,7 @@ type uploadInstruction struct {
 //   - apiKey: from WAVESPEED_API_KEY environment variable
 //   - baseURL: "https://api.wavespeed.ai"
 //   - connectionTimeout: 10.0 seconds
+//   - readTimeout: 120.0 seconds per async submit/poll request (WAVESPEED_READ_TIMEOUT)
 //   - maxRetries: 0 (no task-level retries)
 //   - maxConnectionRetries: 5
 //   - retryInterval: 1.0 second
@@ -258,6 +276,7 @@ func NewClient(opts ...ClientOption) *Client {
 		apiKey:               API.APIKey,
 		baseURL:              API.BaseURL,
 		connectionTimeout:    API.ConnectionTimeout,
+		readTimeout:          API.ReadTimeout,
 		maxRetries:           API.MaxRetries,
 		maxConnectionRetries: API.MaxConnectionRetries,
 		retryInterval:        API.RetryInterval,
@@ -309,6 +328,46 @@ func (c *Client) getHeaders() (map[string]string, error) {
 	}, nil
 }
 
+// Test hooks; production code leaves them at their defaults.
+var (
+	nowFunc   = time.Now
+	sleepFunc = time.Sleep
+	// observeRequestContext, when set, is called with the context of every
+	// submit/result request so tests can assert its deadline.
+	observeRequestContext func(op string, ctx context.Context)
+)
+
+// requestTimeoutFor returns the per-request timeout in seconds (0 = none).
+// An explicit overall timeout keeps applying to each request as before;
+// otherwise async requests use the bounded read timeout, and the sync-mode
+// submit (which stays open until the task finishes) has no deadline.
+func (c *Client) requestTimeoutFor(explicit float64, sync bool) float64 {
+	if explicit > 0 {
+		return explicit
+	}
+	if sync {
+		return 0
+	}
+	if c.readTimeout > 0 {
+		return c.readTimeout
+	}
+	return defaultReadTimeout
+}
+
+func newRequestContext(op string, seconds float64) (context.Context, context.CancelFunc) {
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if seconds > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(seconds*float64(time.Second)))
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	if observeRequestContext != nil {
+		observeRequestContext(op, ctx)
+	}
+	return ctx, cancel
+}
+
 func (c *Client) submit(model string, input map[string]any, enableSyncMode bool, timeout float64) (string, map[string]any, error) {
 	url := c.baseURL + "/api/v3/" + model
 	body := make(map[string]any)
@@ -321,10 +380,7 @@ func (c *Client) submit(model string, input map[string]any, enableSyncMode bool,
 		body["enable_sync_mode"] = true
 	}
 
-	requestTimeout := timeout
-	if requestTimeout == 0 {
-		requestTimeout = defaultTimeout()
-	}
+	requestTimeout := c.requestTimeoutFor(timeout, enableSyncMode)
 
 	connectTimeout := c.connectionTimeout
 	if requestTimeout > 0 && connectTimeout > requestTimeout {
@@ -339,7 +395,7 @@ func (c *Client) submit(model string, input map[string]any, enableSyncMode bool,
 	// The submission POST is deliberately single-shot: if it fails without a
 	// definitive response, the task may already have been created server-side,
 	// so retrying could create duplicate (billed) tasks.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(requestTimeout*float64(time.Second)))
+	ctx, cancel := newRequestContext("submit", requestTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
@@ -417,10 +473,7 @@ func newHTTPClient(connectTimeout float64) *http.Client {
 
 func (c *Client) getResult(requestID string, timeout float64) (map[string]any, error) {
 	url := c.baseURL + "/api/v3/predictions/" + requestID + "/result"
-	requestTimeout := timeout
-	if requestTimeout == 0 {
-		requestTimeout = defaultTimeout()
-	}
+	requestTimeout := c.requestTimeoutFor(timeout, false)
 
 	connectTimeout := c.connectionTimeout
 	if requestTimeout > 0 && connectTimeout > requestTimeout {
@@ -429,7 +482,7 @@ func (c *Client) getResult(requestID string, timeout float64) (map[string]any, e
 
 	var lastErr error
 	for retry := 0; retry <= c.maxConnectionRetries; retry++ {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(requestTimeout*float64(time.Second)))
+		ctx, cancel := newRequestContext("result", requestTimeout)
 		defer cancel()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -491,11 +544,11 @@ func (c *Client) getResult(requestID string, timeout float64) (map[string]any, e
 }
 
 func (c *Client) wait(requestID string, timeout float64, pollInterval float64) (map[string]any, error) {
-	startTime := time.Now()
+	startTime := nowFunc()
 
 	for {
 		if timeout > 0 {
-			elapsed := time.Since(startTime).Seconds()
+			elapsed := nowFunc().Sub(startTime).Seconds()
 			if elapsed >= timeout {
 				return nil, fmt.Errorf("prediction timed out after %.0f seconds (task_id: %s)", timeout, requestID)
 			}
@@ -538,7 +591,7 @@ func (c *Client) wait(requestID string, timeout float64, pollInterval float64) (
 			return nil, err
 		}
 
-		time.Sleep(time.Duration(pollInterval * float64(time.Second)))
+		sleepFunc(time.Duration(pollInterval * float64(time.Second)))
 	}
 }
 
@@ -890,7 +943,7 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 
 	// Apply default options
 	options := &UploadOptions{
-		Timeout: 36000.0,
+		Timeout: defaultUploadTimeout,
 	}
 
 	// Apply user-provided options

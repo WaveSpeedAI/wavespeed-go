@@ -1,6 +1,7 @@
 package wavespeed
 
 import (
+	"os"
 	"testing"
 )
 
@@ -17,8 +18,12 @@ func TestAPIConfigHasExpectedAttributes(t *testing.T) {
 		t.Errorf("Expected ConnectionTimeout to be 10.0, got %f", API.ConnectionTimeout)
 	}
 
-	if API.Timeout != 36000.0 {
-		t.Errorf("Expected Timeout to be 36000.0, got %f", API.Timeout)
+	if API.Timeout != 0 {
+		t.Errorf("Expected Timeout to be 0 (no overall cap), got %f", API.Timeout)
+	}
+
+	if os.Getenv("WAVESPEED_READ_TIMEOUT") == "" && API.ReadTimeout != 120.0 {
+		t.Errorf("Expected ReadTimeout to be 120.0, got %f", API.ReadTimeout)
 	}
 
 	if API.MaxRetries != 0 {

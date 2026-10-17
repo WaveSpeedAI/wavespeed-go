@@ -74,12 +74,24 @@ All parameters are optional. Use option functions to customize behavior:
 output, err := wavespeed.Run(
     "wavespeed-ai/z-image/turbo",
     map[string]any{"prompt": "Cat"},
-    wavespeed.WithTimeout(36000),        // Max wait time in seconds (default: 36000)
+    wavespeed.WithTimeout(600),          // Max wait time in seconds (default: no limit)
     wavespeed.WithPollInterval(1.0),     // Status check interval
     wavespeed.WithSyncMode(true),        // Best-effort sync result attempt
     wavespeed.WithMaxRetries(0),         // Task re-runs after a reported failure (default: 0)
 )
 ```
+
+### Timeouts
+
+By default `Run` waits for the task to reach a terminal status with no overall
+time limit, so long-running tasks (many hours) are fine. Pass
+`WithTimeout(seconds)` with a positive value to bound the total wait; `0` or a
+negative value means no limit. Each submit/poll request is separately bounded by
+the read timeout (default 120 seconds, `WithReadTimeout` or the
+`WAVESPEED_READ_TIMEOUT` environment variable), so one hung request fails alone
+and result polling retries it. In sync mode the submit request stays open until
+the task finishes, so it has no deadline unless you set `WithTimeout`. An
+explicit `WithTimeout` also keeps applying to each individual request, as before.
 
 ### Sync Mode
 
@@ -120,6 +132,7 @@ client := api.NewClient(
     api.WithClientMaxRetries(0),       // Task re-runs after a reported failure; each is a new paid task (default: 0)
     api.WithMaxConnectionRetries(5),   // Result-query GET retries; the submission POST is never retried (default: 5)
     api.WithRetryInterval(1.0),        // Base delay between retries in seconds (default: 1.0)
+    api.WithReadTimeout(120),          // Per-request timeout for submit/poll requests, not the overall wait (default: 120)
 )
 ```
 
