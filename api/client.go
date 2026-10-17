@@ -37,8 +37,8 @@ func (e *SubmissionError) Error() string {
 func (e *SubmissionError) Unwrap() error { return e.Err }
 
 // taskFailedError means the task itself reported status "failed". It is the
-// only error (besides a rate-limited submit) that Run may answer with a task
-// re-run, because the failed task is already finished.
+// only error that Run may answer with a task re-run, because the failed task is
+// already finished.
 type taskFailedError struct {
 	msg string
 }
@@ -564,9 +564,7 @@ func (c *Client) isRetryableError(err error) bool {
 		return strings.Contains(failed.msg, "HTTP 5") || strings.Contains(failed.msg, "HTTP 429")
 	}
 
-	// A 429 on submit is a definitive rejection: no task was created.
-	var httpErr *submitHTTPError
-	return errors.As(err, &httpErr) && httpErr.StatusCode == 429
+	return false
 }
 
 func syncResultURL(baseURL string, data map[string]any) string {

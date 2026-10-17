@@ -796,7 +796,7 @@ func TestIsRetryableError(t *testing.T) {
 		{"failed task rate limited", &taskFailedError{msg: "prediction failed (task_id: x): HTTP 429"}, true},
 		{"failed task wrapped", fmt.Errorf("wrap: %w", &taskFailedError{msg: "prediction failed: HTTP 503"}), true},
 		{"failed task deterministic", &taskFailedError{msg: "prediction failed (task_id: x): content policy violation"}, false},
-		{"submit 429", &submitHTTPError{StatusCode: 429, msg: "HTTP 429"}, true},
+		{"submit 429", &submitHTTPError{StatusCode: 429, msg: "HTTP 429"}, false},
 		{"submit 500", &submitHTTPError{StatusCode: 500, msg: "HTTP 500"}, false},
 		{"submit 502", &submitHTTPError{StatusCode: 502, msg: "HTTP 502"}, false},
 		{"submit 400", &submitHTTPError{StatusCode: 400, msg: "HTTP 400"}, false},
