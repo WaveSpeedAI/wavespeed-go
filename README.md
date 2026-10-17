@@ -74,10 +74,10 @@ All parameters are optional. Use option functions to customize behavior:
 output, err := wavespeed.Run(
     "wavespeed-ai/z-image/turbo",
     map[string]any{"prompt": "Cat"},
-    wavespeed.WithTimeout(60),           // Max wait time in seconds
+    wavespeed.WithTimeout(36000),        // Max wait time in seconds (default: 36000)
     wavespeed.WithPollInterval(1.0),     // Status check interval
     wavespeed.WithSyncMode(true),        // Best-effort sync result attempt
-    wavespeed.WithMaxRetries(3),         // Maximum task retries
+    wavespeed.WithMaxRetries(0),         // Task re-runs after a reported failure (default: 0)
 )
 ```
 
@@ -99,6 +99,17 @@ output, err := wavespeed.Run(
 
 ### Retry Configuration
 
+The submission POST is sent exactly once and is never retried, because a failed
+submission may still have created (and billed) the task. Result polling
+tolerates transient HTTP and network errors. There is no overall timeout
+requirement: tasks can run for hours, and a client-side wait timeout does not
+mean the task failed.
+
+`WithMaxRetries` / `WithClientMaxRetries` (default: 0) only re-run a task that
+itself reported failure with a transient HTTP 5xx/429. Each re-run submits a
+**new, separately billed task**. Poll-side HTTP errors and wait timeouts never
+re-submit.
+
 Configure retries at the client level:
 
 ```go
@@ -106,8 +117,8 @@ import "github.com/WaveSpeedAI/wavespeed-go/api"
 
 client := api.NewClient(
     api.WithAPIKey("your-api-key"),
-    api.WithClientMaxRetries(0),       // Task-level retries (default: 0)
-    api.WithMaxConnectionRetries(5),   // HTTP connection retries (default: 5)
+    api.WithClientMaxRetries(0),       // Task re-runs after a reported failure; each is a new paid task (default: 0)
+    api.WithMaxConnectionRetries(5),   // Result-query GET retries; the submission POST is never retried (default: 5)
     api.WithRetryInterval(1.0),        // Base delay between retries in seconds (default: 1.0)
 )
 ```
