@@ -1208,3 +1208,113 @@ func TestReadTimeoutEnvDefault(t *testing.T) {
 		t.Errorf("default ReadTimeout = %v", API.ReadTimeout)
 	}
 }
+
+// uploadServer serves the ticket and storage PUT. putHandler handles the PUT.
+func uploadServer(t *testing.T, putHandler http.HandlerFunc) *httptest.Server {
+	var serverURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/media/uploads", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"code":200,"message":"ok","data":{"download_url":"https://example.com/u.bin","upload":{"method":"PUT","url":%q}}}`, serverURL+"/put")
+	})
+	mux.HandleFunc("/put", putHandler)
+	s := httptest.NewServer(mux)
+	serverURL = s.URL
+	t.Cleanup(s.Close)
+	return s
+}
+
+func tempUploadFile(t *testing.T, size int) string {
+	f := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(f, make([]byte, size), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestUploadReadTimeoutDefaults(t *testing.T) {
+	s := uploadServer(t, func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body) })
+	var rht time.Duration
+	var hasClientTimeout bool
+	observeUploadClient = func(c *http.Client) {
+		rht = c.Transport.(*http.Transport).ResponseHeaderTimeout
+		hasClientTimeout = c.Timeout != 0
+	}
+	defer func() { observeUploadClient = nil }()
+	client := NewClient(WithAPIKey("k"), WithBaseURL(s.URL))
+	if _, err := client.Upload(tempUploadFile(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if rht != 120*time.Second || hasClientTimeout {
+		t.Errorf("default: ResponseHeaderTimeout=%v clientTimeout set=%v, want 120s and no total timeout", rht, hasClientTimeout)
+	}
+	client = NewClient(WithAPIKey("k"), WithBaseURL(s.URL), WithReadTimeout(7))
+	if _, err := client.Upload(tempUploadFile(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if rht != 7*time.Second {
+		t.Errorf("WithReadTimeout(7): ResponseHeaderTimeout=%v", rht)
+	}
+}
+
+func TestUploadExplicitTimeoutKeepsTotalDeadline(t *testing.T) {
+	s := uploadServer(t, func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body) })
+	var total time.Duration
+	var rht time.Duration
+	observeUploadClient = func(c *http.Client) {
+		total = c.Timeout
+		if tr, ok := c.Transport.(*http.Transport); ok {
+			rht = tr.ResponseHeaderTimeout
+		}
+	}
+	defer func() { observeUploadClient = nil }()
+	client := NewClient(WithAPIKey("k"), WithBaseURL(s.URL))
+	if _, err := client.Upload(tempUploadFile(t, 10), WithUploadTimeout(30)); err != nil {
+		t.Fatal(err)
+	}
+	if total != 30*time.Second || rht != 0 {
+		t.Errorf("explicit: client.Timeout=%v ResponseHeaderTimeout=%v", total, rht)
+	}
+	// Explicit timeout still aborts a slow response.
+	slow := uploadServer(t, func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		time.Sleep(time.Second)
+	})
+	client = NewClient(WithAPIKey("k"), WithBaseURL(slow.URL))
+	if _, err := client.Upload(tempUploadFile(t, 10), WithUploadTimeout(0.2)); err == nil {
+		t.Error("expected explicit timeout to abort slow upload")
+	}
+}
+
+func TestUploadReadTimeoutNotATotalTransferDeadline(t *testing.T) {
+	// The server drains the body at ~10MB/s, so sending 40MB takes far longer
+	// than the 1.5s read timeout, while response headers arrive soon after the
+	// body is written. A total deadline would abort it; a read timeout must not.
+	s := uploadServer(t, func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 1<<20)
+		for {
+			_, err := io.ReadFull(r.Body, buf)
+			time.Sleep(100 * time.Millisecond)
+			if err != nil {
+				break
+			}
+		}
+	})
+	client := NewClient(WithAPIKey("k"), WithBaseURL(s.URL), WithReadTimeout(1.5))
+	start := time.Now()
+	if _, err := client.Upload(tempUploadFile(t, 40<<20)); err != nil {
+		t.Fatalf("slow transfer must succeed: %v (after %v)", err, time.Since(start))
+	}
+	if time.Since(start) <= 1500*time.Millisecond {
+		t.Fatalf("transfer took only %v; test does not exceed the read timeout", time.Since(start))
+	}
+	// A server that never sends response headers is cut by the read timeout.
+	hung := uploadServer(t, func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		time.Sleep(2 * time.Second)
+	})
+	client = NewClient(WithAPIKey("k"), WithBaseURL(hung.URL), WithReadTimeout(0.3))
+	t0 := time.Now()
+	if _, err := client.Upload(tempUploadFile(t, 10)); err == nil || time.Since(t0) > 1500*time.Millisecond {
+		t.Errorf("expected read timeout failure quickly, err=%v after %v", err, time.Since(t0))
+	}
+}

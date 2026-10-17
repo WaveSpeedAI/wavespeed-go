@@ -179,7 +179,11 @@ type UploadOptions struct {
 	Timeout float64
 }
 
-// WithUploadTimeout sets the timeout for file upload.
+// WithUploadTimeout sets an explicit total timeout in seconds for Upload: one
+// deadline covering the upload-ticket request and the file transfer together.
+// By default (not set, or <= 0) uploads use the client's read timeout instead
+// (see WithReadTimeout, default 120s) for each request: it limits only the wait
+// for the server's response, never the time spent sending the file.
 func WithUploadTimeout(timeout float64) UploadOption {
 	return func(o *UploadOptions) {
 		o.Timeout = timeout
@@ -458,6 +462,16 @@ func (c *Client) submit(model string, input map[string]any, enableSyncMode bool,
 // SDK's (connect, read) timeout tuple: the connect timeout must never cap the
 // whole request.
 func newHTTPClient(connectTimeout float64) *http.Client {
+	return newUploadHTTPClient(connectTimeout, 0)
+}
+
+// observeUploadClient is a test hook that sees the HTTP client Upload builds.
+var observeUploadClient func(c *http.Client)
+
+// newUploadHTTPClient is newHTTPClient plus a ResponseHeaderTimeout (0 = none),
+// which bounds the wait for response headers after the request body has been
+// fully written, but not the body transfer itself.
+func newUploadHTTPClient(connectTimeout, responseHeaderTimeout float64) *http.Client {
 	d := time.Duration(connectTimeout * float64(time.Second))
 	if d <= 0 {
 		d = 10 * time.Second
@@ -467,6 +481,8 @@ func newHTTPClient(connectTimeout float64) *http.Client {
 			Proxy:               http.ProxyFromEnvironment,
 			DialContext:         (&net.Dialer{Timeout: d}).DialContext,
 			TLSHandshakeTimeout: d,
+
+			ResponseHeaderTimeout: time.Duration(responseHeaderTimeout * float64(time.Second)),
 		},
 	}
 }
@@ -942,9 +958,7 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 	}
 
 	// Apply default options
-	options := &UploadOptions{
-		Timeout: defaultUploadTimeout,
-	}
+	options := &UploadOptions{}
 
 	// Apply user-provided options
 	for _, opt := range opts {
@@ -952,6 +966,7 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 	}
 
 	url := c.baseURL + "/api/v3/media/uploads"
+	explicitTimeout := options.Timeout > 0
 	requestTimeout := options.Timeout
 
 	fileInfo, err := os.Stat(file)
@@ -974,8 +989,31 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 		return "", err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(requestTimeout*float64(time.Second)))
+	// Default: per-request read timeout. The small ticket request gets a
+	// context deadline; the file PUT is bounded only by ResponseHeaderTimeout
+	// (which starts once the body is fully written), so a large file that is
+	// actively being sent is never cut off. An explicit WithUploadTimeout keeps
+	// the old total deadline over both requests.
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var client, putClient *http.Client
+	if explicitTimeout {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(requestTimeout*float64(time.Second)))
+		client = &http.Client{Timeout: time.Duration(requestTimeout * float64(time.Second))}
+		putClient = client
+	} else {
+		read := c.requestTimeoutFor(0, false)
+		ctx, cancel = context.WithCancel(context.Background())
+		client = newUploadHTTPClient(c.connectionTimeout, read)
+		putClient = client
+		var ticketCancel context.CancelFunc
+		ctx, ticketCancel = context.WithTimeout(ctx, time.Duration(read*float64(time.Second)))
+		defer ticketCancel()
+	}
 	defer cancel()
+	if observeUploadClient != nil {
+		observeUploadClient(client)
+	}
 
 	ticketReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -989,7 +1027,6 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 		ticketReq.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: time.Duration(requestTimeout * float64(time.Second))}
 	resp, err := client.Do(ticketReq)
 	if err != nil {
 		return "", err
@@ -1023,7 +1060,14 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 	if method == "" {
 		method = http.MethodPut
 	}
-	uploadReq, err := http.NewRequestWithContext(ctx, method, result.Data.Upload.URL, f)
+	putCtx := ctx
+	if !explicitTimeout {
+		// The ticket deadline must not apply to the file transfer.
+		var putCancel context.CancelFunc
+		putCtx, putCancel = context.WithCancel(context.Background())
+		defer putCancel()
+	}
+	uploadReq, err := http.NewRequestWithContext(putCtx, method, result.Data.Upload.URL, f)
 	if err != nil {
 		return "", err
 	}
@@ -1031,7 +1075,7 @@ func (c *Client) Upload(file string, opts ...UploadOption) (string, error) {
 	for key, value := range result.Data.Upload.Headers {
 		uploadReq.Header.Set(key, value)
 	}
-	uploadResp, err := client.Do(uploadReq)
+	uploadResp, err := putClient.Do(uploadReq)
 	if err != nil {
 		return "", err
 	}

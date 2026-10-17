@@ -65,7 +65,7 @@ Key modules in `api/`:
 - **Sync Mode**: Single request that waits for result
 - **Retry Logic**: Configurable task-level and connection-level retries
 - **Timeout Control**: Overall wait has no limit by default (`WithTimeout(n>0)` bounds it); async submit/result requests use a separate 120s read timeout (`WithReadTimeout`); sync-mode submit has no deadline unless `WithTimeout` is set
-- **File Upload**: Direct file upload to WaveSpeed storage
+- **File Upload**: Direct file upload to WaveSpeed storage (per-request read timeout 120s, not a total-transfer limit; `WithUploadTimeout` sets an explicit total deadline)
 
 ### Configuration
 

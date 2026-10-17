@@ -24,8 +24,8 @@ type APIConfig struct {
 	Timeout float64
 
 	// Per-request timeout in seconds for the async submit POST and each result
-	// GET (default 120; env WAVESPEED_READ_TIMEOUT). It never limits the
-	// overall wait for a task.
+	// GET and each upload request (default 120; env WAVESPEED_READ_TIMEOUT). It
+	// never limits the overall wait for a task or the time spent sending a file.
 	ReadTimeout float64
 
 	// Maximum number of retries for the entire operation (task-level retries)
@@ -55,10 +55,6 @@ var API = &APIConfig{
 // defaultReadTimeout is the per-request timeout (seconds) for async submit and
 // result requests when none is configured.
 const defaultReadTimeout = 120.0
-
-// defaultUploadTimeout is the upload timeout (seconds) when WithUploadTimeout
-// is not used. Uploads are not task waits and keep a bounded default.
-const defaultUploadTimeout = 36000.0
 
 // envFloat parses a positive float from the environment, else returns def.
 func envFloat(name string, def float64) float64 {

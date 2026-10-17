@@ -138,7 +138,11 @@ client := api.NewClient(
 
 ### Upload Files
 
-Upload images, videos, or audio files:
+Upload images, videos, or audio files. Uploads use the same read timeout as
+other requests (default 120 seconds, `WithReadTimeout`): it limits only how long
+the SDK waits for the server to respond, not how long a large file takes to
+send. `WithUploadTimeout(seconds)` instead sets one explicit total deadline for
+the whole upload.
 
 ```go
 import "github.com/WaveSpeedAI/wavespeed-go"
